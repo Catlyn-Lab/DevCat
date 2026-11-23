@@ -137,3 +137,30 @@ files stay on this computer and are never offered to the phone as files.
 - A size warning before downloading a big snapshot (suggest: ask above ~200 MB).
 - Tests: unit tests for quoting, the dot-command guard and the `-json` parsing; an integration test against a
   local `sshd` + `sqlite3` if the test setup has one (see how JDBC over SSH is tested).
+
+## As built (decisions made while building)
+
+- **Live needs `sqlite3` 3.26+**, not just any `sqlite3`: the shared structure queries use
+  `pragma_table_xinfo` (3.26). Older → snapshot. `-safe` from 3.37.
+- **Output:** `.mode quote` with `.headers on`, `2>&1` so errors land in order with the rows, a random
+  marker line (`.print`) after each statement and after a `SELECT changes()`. Parsed values: integers
+  exact (past 2^53 as text, like the local driver), BLOBs from `X'…'`, text from `'…'`, `unistr('…')`
+  (3.50+) and `replace(…,char(n))` (older).
+- **Cut short on the host:** a side-effect-free `SELECT`/`WITH`/`VALUES` runs as
+  `SELECT * FROM (…) LIMIT max+1`; one with no rows gets its column names from a `LEFT JOIN` onto a
+  one-row select.
+- **Checks** (`sqlite_ssh::check_statement`, every statement, every access level): no line starting
+  with `.`, no `ATTACH`, `VACUUM INTO`, `readfile`, `writefile`, `edit`, `fsdir`, `zipfile`,
+  `load_extension`, … (outside string literals); the statement must be complete per
+  `sqlite3_complete`. Parameters go in as literals whose control characters become `char(n)`.
+- **Catalog code shared:** `sqlite.rs` now reads the catalog through a small `Rows` trait, implemented
+  by the local sqlx connection and by the remote `sqlite3`.
+- **Cancel** kills the remote `sqlite3`; the next call starts a new one (and says temp tables and an
+  open transaction are gone). A dropped SSH session is logged into again on the next call.
+- **Snapshot:** refused above 1 GB (instead of asking); checked with `PRAGMA quick_check`, retried 3
+  times; its WAL folded in locally; the tree's `main` shows `host:path (copy, HH:MM)` and the version
+  line says it's a read-only copy and why. **Refresh = "Reconnect"** in the connection's menu (shown for
+  SQLite over SSH).
+- **Tested** with unit tests and `sqlite_ssh::tests::over_ssh` against throwaway sshd containers:
+  Alpine (sqlite3 3.45, `-safe`), Debian 10 (3.27, no `-safe`), and Alpine without sqlite3 (snapshot of a
+  WAL database).

@@ -1,7 +1,7 @@
 // Context menu builders for every tree row type.
 import {
   Activity, AppWindow, ArrowDown, Cable, FolderCode, ArrowDownUp, ArrowLeftRight, Bot, Crosshair, LogOut, ArrowUp, Check, Code, Copy, CopyPlus, Eraser, ExternalLink, FilePlus, Folder, FolderInput,
-  FolderMinus, FolderPlus, GitCompare, GitFork, Network, Palette, Pencil, PencilRuler, Play, Plug, Plus, RefreshCw, SquareTerminal,
+  FolderMinus, FolderPlus, GitCompare, GitFork, Network, Palette, Pencil, PencilRuler, Play, Plug, Plus, RefreshCw, RotateCw, SquareTerminal,
   Star, StarOff, Table2, Trash2, Unplug,
 } from "lucide-react";
 import type { Project } from "../../../lib/types";
@@ -141,6 +141,10 @@ function connectionMenu(conn: ConnectionConfig): MenuItem[] {
     isOpen
       ? { label: "Disconnect", icon: ic(Unplug), onClick: () => disconnect(conn) }
       : { label: "Connect", icon: ic(Plug), onClick: () => activateConnection(conn) },
+    // SQLite over SSH: a fresh session there, or a fresh copy when the host has no usable sqlite3
+    ...(isOpen && conn.kind === "sqlite" && conn.ssh?.enabled
+      ? [{ label: "Reconnect", icon: ic(RotateCw), onClick: async () => { await disconnect(conn); void activateConnection(conn); } } as MenuItem]
+      : []),
     { label: "New query", icon: ic(SquareTerminal), onClick: () => openQuery(conn.id, { database: conn.database }) },
     { label: "Refresh", icon: ic(RefreshCw), shortcut: "F5", onClick: () => refresh(conn.id, []) },
     { label: "Ask DevCat Agent", icon: ic(Bot), onClick: () => void openConnectionAgent(conn) },

@@ -32,7 +32,8 @@ export const COLOR_PRESETS: { value: string | null; label: string }[] = [
 ];
 
 export const URL_KINDS: ConnectionKind[] = ["postgres", "mysql", "mongodb", "redis"];
-export const SSH_KINDS: ConnectionKind[] = ["postgres", "mysql", "mssql", "mongodb", "redis", "jdbc"];
+/** Kinds with an SSH tab. SQLite: the file is on the SSH host and opened there (src-tauri/src/db/sqlite_ssh.rs). */
+export const SSH_KINDS: ConnectionKind[] = ["postgres", "mysql", "mssql", "mongodb", "redis", "jdbc", "sqlite"];
 export const SSL_KINDS: ConnectionKind[] = ["postgres", "mysql", "mssql", "mongodb", "redis"];
 
 const URL_PLACEHOLDER: Partial<Record<ConnectionKind, string>> = {
@@ -245,9 +246,24 @@ export function JdbcSection({ cfg, set, setOpt }: SectionProps) {
   );
 }
 
-export function SqliteSection({ cfg, set }: SectionProps) {
+export function SqliteSection({ cfg, set, setOpt }: SectionProps) {
+  if (cfg.ssh?.enabled) {
+    const host = cfg.ssh.host || "the SSH host";
+    return (
+      <>
+        <Row label="Database file" hint={`The file's path on ${host} (~/ is your home there). DevCat opens it there with sqlite3; without sqlite3 3.26+ it copies the file here, read-only.`}>
+          <Input className="font-mono" value={cfg.filePath ?? ""} placeholder="/var/lib/app/data.sqlite"
+            onChange={(e) => set({ filePath: e.target.value || null })} />
+        </Row>
+        <Row label="">
+          <Checkbox label="Create the file if it doesn't exist" checked={cfg.options.create === "true"}
+            onChange={(v) => setOpt("create", v ? "true" : null)} />
+        </Row>
+      </>
+    );
+  }
   return (
-    <Row label="Database file" hint="Choose an existing file, or pick a location to create a new database.">
+    <Row label="Database file" hint="Choose an existing file, or pick a location to create a new database. On a server? Turn on SSH to open it there.">
       <FileInput
         mode="open+save"
         value={cfg.filePath ?? ""}
@@ -675,8 +691,9 @@ export function SshSection({ cfg, set }: SectionProps) {
   const up = (p: Partial<SshConfig>) => set({ ssh: { ...ssh, ...p } });
   return (
     <>
-      <Row label="" hint={cfg.kind === "jdbc" ? "The driver then runs on the SSH host, with its Java: DevCat copies its small helper to ~/.devcat/jdbc there. The database is reached from that host." : undefined}>
-        <Checkbox label={cfg.kind === "jdbc" ? "Run the driver on another computer over SSH" : "Connect through an SSH tunnel"} checked={ssh.enabled} onChange={(v) => up({ enabled: v })} />
+      <Row label="" hint={cfg.kind === "jdbc" ? "The driver then runs on the SSH host, with its Java: DevCat copies its small helper to ~/.devcat/jdbc there. The database is reached from that host."
+        : cfg.kind === "sqlite" ? "The database file is then on the SSH host: give its path there on the General tab. DevCat runs the host's sqlite3 on it, so changes are made there; a host without sqlite3 3.26+ gets a read-only copy here instead." : undefined}>
+        <Checkbox label={cfg.kind === "jdbc" ? "Run the driver on another computer over SSH" : cfg.kind === "sqlite" ? "Open the file on another computer over SSH" : "Connect through an SSH tunnel"} checked={ssh.enabled} onChange={(v) => up({ enabled: v })} />
       </Row>
       <fieldset disabled={!ssh.enabled} className={clsx("flex flex-col gap-2.5", !ssh.enabled && "opacity-50")}>
         <Row label="SSH host">
@@ -705,7 +722,7 @@ export function SshSection({ cfg, set }: SectionProps) {
 }
 
 /** Managed option keys edited by dedicated fields; hidden from the raw editor. */
-const MANAGED_OPTIONS = new Set(["context", "namespace", "managementPort", "useTls", "insecureTls", "basePath", "networkId", "keyPath", "jump", "startDir", "startup", "forwards", "parent", "driverJars", "driverClass", "javaPath", "schema", "properties", "jarHashes", "encoding", "databases"]);
+const MANAGED_OPTIONS = new Set(["context", "namespace", "managementPort", "useTls", "insecureTls", "basePath", "networkId", "keyPath", "jump", "startDir", "startup", "forwards", "parent", "driverJars", "driverClass", "javaPath", "schema", "properties", "jarHashes", "encoding", "databases", "create"]);
 
 /** VPN / SSH tunnel profile that is connected before this connection opens (options.networkId). */
 function NetworkRow({ cfg, setOpt }: SectionProps) {

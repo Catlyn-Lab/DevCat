@@ -1793,6 +1793,7 @@ dependencies = [
  "keyring",
  "kube",
  "libc",
+ "libsqlite3-sys",
  "mongodb",
  "once_cell",
  "parking_lot",
