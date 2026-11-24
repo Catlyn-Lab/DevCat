@@ -152,7 +152,7 @@ impl Tool for Write {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write".into(),
-            description: "Create a file, or replace a file's whole content. Creates missing folders. Prefer `edit` for changing part of an existing file.".into(),
+            description: "Create a file, or replace a file's whole content. Creates missing folders. Prefer `edit` for changing part of an existing file. To write over a file that exists, `read` it first in this chat: a write over a file you haven't read, or that changed since you did, is refused.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

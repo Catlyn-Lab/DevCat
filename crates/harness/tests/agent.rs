@@ -2023,3 +2023,57 @@ async fn an_unknown_event_is_skipped() {
     assert_eq!(again.messages().len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `write` over a file the chat never read, or that changed since it did, is refused; after a
+/// read it goes through, and a new file is always fine.
+#[tokio::test]
+async fn writing_over_a_file_it_hasnt_seen_is_refused() {
+    let (dir, mut session) = project().await;
+    let write = |id: &str, path: &str| tool(id, "write", json!({ "path": path, "content": "new\n" }));
+    let model = Scripted::new(vec![
+        vec![write("w1", "notes.txt")],
+        vec![write("w2", "fresh.txt")],
+        vec![tool("r1", "read", json!({ "path": "notes.txt" }))],
+        vec![write("w3", "notes.txt")],
+        vec![text("done")],
+    ]);
+    let mut agent = Agent::new(model, Registry::standard(), Policy::AutoEdit, Arc::new(DenyAll), "s".into());
+    let mut results = HashMap::new();
+    agent.turn(&mut session, "rewrite", &Cancel::default(), &mut |e| if let AgentEvent::ToolResult { id, content, is_error } = e { results.insert(id, (content, is_error)); }).await.unwrap();
+    assert!(results["w1"].1 && results["w1"].0.contains("haven't read it"), "{:?}", results["w1"]);
+    assert!(!results["w2"].1 && !results["w3"].1, "{results:?}");
+    assert_eq!(std::fs::read_to_string(dir.join("proj/notes.txt")).unwrap(), "new\n");
+
+    // changed by someone else after the read: refused again
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(dir.join("proj/notes.txt"), "the user's change\n").unwrap();
+    let model = Scripted::new(vec![vec![write("w4", "notes.txt")], vec![text("ok")]]);
+    agent.model = model;
+    let mut out = None;
+    agent.turn(&mut session, "again", &Cancel::default(), &mut |e| if let AgentEvent::ToolResult { content, .. } = e { out = Some(content) }).await.unwrap();
+    assert!(out.unwrap().contains("changed since you last read"));
+    assert_eq!(std::fs::read_to_string(dir.join("proj/notes.txt")).unwrap(), "the user's change\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A subfolder's AGENTS.md comes with the first look into that folder, once.
+#[tokio::test]
+async fn a_subfolders_rules_come_with_the_first_look_into_it() {
+    let (dir, mut session) = project().await;
+    std::fs::create_dir_all(dir.join("proj/web/src")).unwrap();
+    std::fs::write(dir.join("proj/web/AGENTS.md"), "Use pnpm, never npm.\n").unwrap();
+    std::fs::write(dir.join("proj/web/src/app.ts"), "export {}\n").unwrap();
+    let model = Scripted::new(vec![
+        vec![tool("r1", "read", json!({ "path": "notes.txt" }))],
+        vec![tool("r2", "read", json!({ "path": "web/src/app.ts" }))],
+        vec![tool("g1", "grep", json!({ "pattern": "export", "path": "web" }))],
+        vec![text("done")],
+    ]);
+    let mut agent = Agent::new(model, Registry::standard(), Policy::Ask, Arc::new(DenyAll), "s".into());
+    let mut results = HashMap::new();
+    agent.turn(&mut session, "look", &Cancel::default(), &mut |e| if let AgentEvent::ToolResult { id, content, .. } = e { results.insert(id, content); }).await.unwrap();
+    assert!(!results["r1"].contains("folder-rules"));
+    assert!(results["r2"].contains("<folder-rules path=\"web/AGENTS.md\">") && results["r2"].contains("Use pnpm"), "{}", results["r2"]);
+    assert!(!results["g1"].contains("folder-rules"), "given twice: {}", results["g1"]);
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -515,6 +515,12 @@ pub struct Agent {
     /// Only these tools run (a background review: see [`crate::review`]); the others are still
     /// declared, so the requests start like the chat's, and refused when called.
     pub(crate) only: Option<HashSet<String>>,
+    /// Files this chat read or wrote whole, with when they were last changed as it left them: a
+    /// `write` over a file it never read, or that changed since, is refused ([`Agent::stale`]).
+    seen: std::sync::Mutex<HashMap<std::path::PathBuf, Option<std::time::SystemTime>>>,
+    /// The rule files of the project's subfolders the model was given with a result
+    /// ([`Agent::folder_rules`]).
+    rules_given: std::sync::Mutex<HashSet<std::path::PathBuf>>,
     /// Steps per turn before it stops with [`TurnEnd::StepLimit`]; 0 = no limit. [`MAX_STEPS`]
     /// by default.
     pub max_steps: u32,
@@ -532,7 +538,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(model: Arc<dyn Model>, tools: Registry, policy: Policy, approver: Arc<dyn Approver>, system: String) -> Agent {
-        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), checkpoints: None, checkpointed: false, told_no_checkpoint: false, only: None, max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
+        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), checkpoints: None, checkpointed: false, told_no_checkpoint: false, only: None, seen: Default::default(), rules_given: Default::default(), max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
     }
 
     /// Run the hooks of `event` (see [`Hooks::run`]); what they say to the user is sent on. Stop
@@ -1279,6 +1285,8 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 checkpointed: false,
                 told_no_checkpoint: true,
                 only: None,
+                seen: Default::default(),
+                rules_given: Default::default(),
                 max_steps: HELPER_MAX_STEPS,
                 allowed: self.allowed.clone(),
                 helper: Some(id.to_string()),
@@ -1545,6 +1553,13 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             let (tool_name, tool_input) = hooks::foreign_tool(name, input, &ctx.cwd);
             json!({ "tool_name": tool_name, "tool_input": tool_input, "tool_use_id": id })
         };
+        // a whole file written over one the model hasn't seen as it is now would lose what's in it
+        if name == "write"
+            && let Some(why) = self.stale(session, ctx, &input)
+        {
+            return (fit(session, id, name, ToolOutput::err(why)).await, None);
+        }
+        let path = input.get("path").and_then(Value::as_str).map(|p| crate::tools::resolve(ctx, p));
         // 3. timeout
         let limit = tool.timeout(&input);
         let after = foreign(&input);
@@ -1580,8 +1595,107 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         for c in context.iter().chain(&post.context) {
             out.content.push_str(&format!("\n\n{}", crate::session::hook_context(c)));
         }
+        if !out.is_error
+            && let Some(path) = &path
+        {
+            if matches!(name, "read" | "write" | "edit") && path.is_file() {
+                let changed = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                self.seen.lock().unwrap_or_else(|e| e.into_inner()).insert(path.clone(), changed);
+            }
+            if matches!(name, "read" | "write" | "edit" | "glob" | "grep") {
+                for rules in self.folder_rules(session, ctx, path) {
+                    out.content.push_str(&format!("\n\n{rules}"));
+                }
+            }
+        }
         (out, halt)
     }
+}
+
+impl Agent {
+    /// Why a `write` of `input` mustn't run, if it mustn't: the file is there and this chat never
+    /// read it (nor wrote it), or it changed since (the user, or a command, changed it). Writing it
+    /// whole would throw away what's in it now. A chat opened again doesn't know when it last
+    /// looked, so there a read in its log is enough.
+    fn stale(&self, session: &Session, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        let path = crate::tools::resolve(ctx, input.get("path").and_then(Value::as_str)?);
+        let now = std::fs::metadata(&path).ok().filter(|m| m.is_file())?.modified().ok();
+        let shown = path.strip_prefix(&ctx.cwd).unwrap_or(&path).display().to_string();
+        match self.seen.lock().unwrap_or_else(|e| e.into_inner()).get(&path) {
+            Some(t) if *t == now => None,
+            Some(_) => Some(format!("Not written: {shown} changed since you last read or wrote it (the user or a command changed it), so writing it whole would undo that. Read it again, then make your change (`edit` changes only what you replace).")),
+            None if touched(session, ctx, &path) => None,
+            None => Some(format!("Not written: {shown} already exists and you haven't read it in this chat, so writing it whole would replace what's in it with what you guessed. Read it first, then use `edit` for a change (or `write` the whole of it if that's what you mean).")),
+        }
+    }
+
+    /// The rule files (`AGENTS.md`, else `CLAUDE.md`) of the project's subfolders on the way to
+    /// `path` that the model hasn't been given yet, each in a `<folder-rules>` block for the tool's
+    /// result. The project's own are in the system prompt; a subfolder's are often the ones that
+    /// matter for its files, and they come with the first look into it, so the system prompt (and
+    /// the provider's cache of it) stays as it is. (After Hermes Agent's subdirectory hints, MIT.)
+    fn folder_rules(&self, session: &Session, ctx: &ToolCtx, path: &Path) -> Vec<String> {
+        let root = &ctx.cwd;
+        let Ok(rel) = path.strip_prefix(root) else { return vec![] };
+        let mut dirs = Vec::new();
+        let mut d = if path.is_dir() { Some(rel) } else { rel.parent() };
+        while let Some(x) = d.filter(|x| !x.as_os_str().is_empty()) {
+            dirs.push(x.to_path_buf());
+            d = x.parent();
+        }
+        dirs.reverse();
+        let mut out = Vec::new();
+        for dir in dirs.into_iter().take(FOLDER_DEPTH) {
+            let Some(file) = ["AGENTS.md", "CLAUDE.md"].iter().map(|n| dir.join(n)).find(|f| root.join(f).is_file()) else { continue };
+            let shown = file.to_string_lossy().replace('\\', "/");
+            let marker = format!("<folder-rules path=\"{shown}\">");
+            {
+                let mut given = self.rules_given.lock().unwrap_or_else(|e| e.into_inner());
+                if given.contains(&file) {
+                    continue;
+                }
+                given.insert(file.clone());
+            }
+            // a chat opened again: given in its log already
+            if session.events().iter().any(|e| matches!(e, SessionEvent::ToolResults { results, .. } if results.iter().any(|b| matches!(b, Block::ToolResult { content, .. } if content.contains(&marker))))) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(root.join(&file)) else { continue };
+            let folder = dir.to_string_lossy().replace('\\', "/");
+            out.push(format!("{marker}\n{}\n</folder-rules>\n(The rules for the files in {folder}/: follow them there.)", clip(text.trim(), FOLDER_RULES_CHARS)));
+            if out.len() >= 3 {
+                break;
+            }
+        }
+        out
+    }
+}
+
+/// Subfolders deep that rule files are looked for ([`Agent::folder_rules`]), and how much of one
+/// is given.
+const FOLDER_DEPTH: usize = 8;
+const FOLDER_RULES_CHARS: usize = 20_000;
+
+/// Whether the log has a `read`, `write` or `edit` of `path` that worked.
+fn touched(session: &Session, ctx: &ToolCtx, path: &Path) -> bool {
+    let mut ids = HashSet::new();
+    for e in session.events() {
+        match e {
+            SessionEvent::Assistant { content, .. } => {
+                for b in content {
+                    if let Block::ToolUse { id, name, input } = b
+                        && matches!(name.as_str(), "read" | "write" | "edit")
+                        && input.get("path").and_then(Value::as_str).is_some_and(|p| crate::tools::resolve(ctx, p) == path)
+                    {
+                        ids.insert(id.clone());
+                    }
+                }
+            }
+            SessionEvent::ToolResults { results, .. } if results.iter().any(|b| matches!(b, Block::ToolResult { tool_use_id, is_error: false, .. } if ids.contains(tool_use_id))) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A call through the first half of the pipeline ([`Agent::prepare`]).
