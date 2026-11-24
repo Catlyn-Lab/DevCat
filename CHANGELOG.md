@@ -12,6 +12,29 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
 
 ## Unreleased
 
+- **DevCat Agent: put the files back to before a message**: the agent saves the project's files before it changes
+  them (once a turn, and again before a command that deletes or overwrites), in a store of its own that never
+  touches the project's `.git`. **Restore files** on one of your messages shows which files would change, then puts
+  them back; the files as they were are saved first, so a restore can be undone too, and the agent is told with
+  your next message. Not in ghost chats or folders on SSH hosts.
+- **DevCat Agent: commands that could wreck the computer always ask**: deleting the disk or a system or home folder,
+  writing to a raw disk, piping a download into a shell, `sudo -S`, fork bombs and shutting down ask every time,
+  also in auto-edit and Bypass, and "always allow" doesn't carry over to the next one. The approval says why.
+- **DevCat Agent: search earlier chats**: the agent can look up the folder's earlier chats (and the part of this
+  one a summary replaced) when you refer to earlier work. Secrets are hidden in what it finds. Only in chats with
+  DevCat connections, never in ghost chats.
+- **DevCat Agent: learn from chats** (off by default, per connection): every few turns, and after a long one, the
+  agent looks back over the chat in the background and saves to memory what's worth keeping; the chat shows what
+  it saved. It can also save a procedure as a skill (`.agents/skills`), which asks first and shows the text.
+- **DevCat Agent: a fallback connection**: when a connection's provider is down, out of quota or refuses the key,
+  another DevCat Agent connection you pick takes the step, and the next message tries the first one again.
+- **DevCat Agent: steadier on long work**: a call that keeps returning the same result, or a few calls going round
+  in a circle, are stopped with a note instead of spending the turn; a reply stuck repeating itself isn't asked to
+  go on. Old long tool output is left out (with where it's saved) before the conversation is summarized. Edits whose
+  text differs only in indentation or a level of backslash escaping now go through; `write` won't replace a file
+  the agent hasn't read or that changed since. A subfolder's AGENTS.md comes with the agent's first look into it,
+  and a helper's answer says how it went and which files it read.
+
 ## 0.34.1 - 2026-11-22
 
 - **Claude Code in an SSH folder without Claude Code on the server** (#231): a Claude Code tab in an SSH session's folder

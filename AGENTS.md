@@ -183,6 +183,27 @@ or outside the database's network, uses JDBC). Keep these rules:
 - **stdout is the protocol**: the helper points `System.out` at stderr so a driver that prints can't break it, and
   DevCat skips any line that isn't JSON (a login banner over SSH).
 
+## DevCat Agent: undo, learning and guards
+
+Ideas taken from Hermes Agent (MIT), adapted to these rules:
+
+- **Checkpoints** (`crates/harness/src/checkpoint.rs`): the project's files are saved in a shadow git store
+  (`<data>/agent-checkpoints`) before a turn's first change and before each command `danger::destructive` names;
+  each one is noted in `<session>.checkpoints.json` (`Session::marks`), not in the log. Every git call runs with
+  the user's global and system config, hooks, attributes and fsmonitor off: never let one read the user's git
+  config or touch the project's `.git`. `agent_restore` is for the computer's window only, like `agent_fork`: keep
+  it out of the phone dispatcher. No checkpoints in a ghost chat or an SSH folder.
+- **The danger floor** (`danger::floor`): a `shell` command it names asks whatever the policy, hooks or an earlier
+  "always allow" say, and is allowed one call at a time (`ApprovalRequest::warning`). Tests of it must never run
+  such a command for real: use a fake `shell` tool.
+- **`chat_search`** reads the folder's earlier chats, which hold what agents read from connections: it's given only
+  where connections are (`agent::build`, `connections`), never in a ghost chat, and redacts secrets.
+- **Background review** (`review.rs`, `AgentSettings::learn`, off by default): a fork in `<session>.agents/` with
+  only `REVIEW_TOOLS` (memory) allowed; never in a ghost chat or a scheduled job, and it never gets `skill_save`
+  or anything that reaches outside memory. A new message cancels it.
+- **`skill_save`** writes `.agents/skills/<name>/SKILL.md` (never Claude's own folders), asks like an edit, never
+  replaces a skill, and refuses secret-looking text. Not in a ghost chat or an SSH folder.
+
 ## Ghost chats
 
 A ghost chat (`agent_open` with `ghost_window`, `features/agent/ghost.ts`, a window with only the chat:
