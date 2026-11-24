@@ -54,6 +54,7 @@ csv = "1.4.0"
 serde_yaml = "0.9.34"
 uuid = { version = "1.28.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
+libsqlite3-sys = "0.37.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "chrono", "uuid", "json", "rust_decimal", "macros"] }
 rust_decimal = "1.43.0"
 tiberius = { version = "0.13.0", default-features = false, features = ["tds73", "rustls", "chrono", "rust_decimal", "sql-browser-tokio"] }

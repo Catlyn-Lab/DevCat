@@ -56,7 +56,7 @@ pub struct ConnectionConfig {
     /// Default database / initial catalog. For Redis: db index. For RabbitMQ: vhost.
     #[serde(default)]
     pub database: Option<String>,
-    /// SQLite file path, or kubeconfig path for Kubernetes.
+    /// SQLite file path (on the SSH host when `ssh` is on: `db/sqlite_ssh.rs`), or kubeconfig path for Kubernetes.
     #[serde(default)]
     pub file_path: Option<String>,
     /// Full connection string / URI override (e.g. mongodb+srv://...). Takes precedence.

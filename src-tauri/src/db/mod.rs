@@ -12,6 +12,7 @@ pub mod postgres;
 pub mod redis;
 pub mod sql_common;
 pub mod sqlite;
+pub mod sqlite_ssh;
 pub mod ssh;
 pub mod ddl;
 pub mod transfer;
@@ -273,6 +274,8 @@ pub async fn connect(cfg: &ConnectionConfig) -> AppResult<DynDriver> {
     Ok(match cfg.kind {
         ConnectionKind::Postgres => Arc::new(postgres::PostgresDriver::connect(cfg).await?),
         ConnectionKind::Mysql => Arc::new(mysql::MysqlDriver::connect(cfg).await?),
+        // a file on another computer, opened there with its sqlite3 (or copied here, read-only)
+        ConnectionKind::Sqlite if cfg.ssh.as_ref().is_some_and(|s| s.enabled) => sqlite_ssh::connect(cfg).await?,
         ConnectionKind::Sqlite => Arc::new(sqlite::SqliteDriver::connect(cfg).await?),
         ConnectionKind::Mssql => Arc::new(mssql::MssqlDriver::connect(cfg).await?),
         ConnectionKind::Mongodb => Arc::new(mongo::MongoDriver::connect(cfg).await?),

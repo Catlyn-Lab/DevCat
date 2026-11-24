@@ -82,7 +82,7 @@ impl SqliteDriver {
     }
 
     fn db_of<'a>(&self, t: Option<&'a str>) -> &'a str {
-        t.map(str::trim).filter(|d| !d.is_empty()).unwrap_or("main")
+        db_of(t)
     }
 
     /// Run one statement, collecting at most `max_rows` rows.
@@ -143,123 +143,388 @@ impl SqliteDriver {
             message: None,
         })
     }
+}
 
-    async fn structures(&self, conn: &mut SqliteConnection, db: &str, table: Option<&str>) -> AppResult<Vec<TableStructure>> {
-        let master = format!("{}.sqlite_master", q(db));
-        let tables: Vec<(String, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT name, sql FROM {master} WHERE (?1 IS NULL AND type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\') \
-             OR (name = ?1 AND type IN ('table', 'view')) ORDER BY name"
-        )))
-        .bind(table)
-        .fetch_all(&mut *conn)
-        .await?;
-        let mut out: Vec<TableStructure> = Vec::with_capacity(tables.len());
-        let mut index: HashMap<String, usize> = HashMap::new();
-        let mut autoinc: HashMap<String, bool> = HashMap::new();
-        for (name, sql) in tables {
-            index.insert(name.clone(), out.len());
-            autoinc.insert(name.clone(), sql.unwrap_or_default().to_ascii_uppercase().contains("AUTOINCREMENT"));
-            out.push(TableStructure { table: Some(TableRef { database: Some(db.to_string()), schema: None, name }), ..Default::default() });
-        }
-        if out.is_empty() {
-            return Ok(out);
-        }
-        let filter = "(?2 IS NULL AND m.type = 'table' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\') OR (m.name = ?2 AND m.type IN ('table', 'view'))";
-        type ColRow = (String, String, String, i64, Option<String>, i64, i64);
-        let cols: Vec<ColRow> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT m.name, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk, p.hidden \
-             FROM {master} m JOIN pragma_table_xinfo(m.name, ?1) p WHERE {filter} ORDER BY m.name, p.cid"
-        )))
-        .bind(db)
-        .bind(table)
-        .fetch_all(&mut *conn)
-        .await?;
-        let mut pk_count: HashMap<String, usize> = HashMap::new();
-        for c in cols.iter().filter(|c| c.5 > 0) {
-            *pk_count.entry(c.0.clone()).or_default() += 1;
-        }
-        for (t, name, ty, notnull, default, pk, hidden) in cols {
-            let Some(&ix) = index.get(&t) else { continue };
-            // INTEGER PRIMARY KEY is an alias of the rowid and auto-assigned.
-            let rowid_alias = pk > 0 && pk_count.get(&t) == Some(&1) && ty.eq_ignore_ascii_case("INTEGER");
-            let ts = &mut out[ix];
-            let default = match hidden {
-                2 | 3 => Some(format!("GENERATED ALWAYS AS (...) {}", if hidden == 3 { "STORED" } else { "VIRTUAL" })),
-                _ => default,
+// -------------------------------------------------------------------------------------------------
+// The catalog, over any SQLite session
+//
+// Reading the catalog (tree, structure, DDL, schema snapshot) is the same SQL whether the database
+// is a local file (sqlx) or a file on an SSH host (its `sqlite3`, `sqlite_ssh.rs`); only how a query
+// with parameters runs differs. So it is written once, against [`Rows`].
+
+/// A SQLite session that runs a query with positional parameters (`?1`, `?2`, … or `?`) and
+/// returns its rows as values: integers and reals as numbers, text as strings, NULL as null.
+#[async_trait]
+pub(super) trait Rows: Send {
+    async fn rows(&mut self, sql: &str, params: &[Value]) -> AppResult<Vec<Vec<Value>>>;
+}
+
+#[async_trait]
+impl Rows for SqliteConnection {
+    async fn rows(&mut self, sql: &str, params: &[Value]) -> AppResult<Vec<Vec<Value>>> {
+        let mut qy = sqlx::query(AssertSqlSafe(sql.to_string()));
+        for p in params {
+            qy = match p {
+                Value::Null => qy.bind(None::<String>),
+                Value::Number(n) => match n.as_i64() {
+                    Some(i) => qy.bind(i),
+                    None => qy.bind(n.as_f64().unwrap_or_default()),
+                },
+                Value::String(s) => qy.bind(s.clone()),
+                other => qy.bind(other.to_string()),
             };
-            ts.columns.push(ColumnDef {
-                name,
-                data_type: ty,
-                nullable: notnull == 0 && pk == 0,
-                default,
-                is_primary_key: pk > 0,
-                auto_increment: rowid_alias || (pk > 0 && autoinc.get(&t) == Some(&true)),
-                comment: None,
-                ordinal: ts.columns.len() as u32 + 1,
-            });
         }
-        type IdxRow = (String, String, i64, String, Option<String>);
-        let idx: Vec<IdxRow> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT m.name, il.name, il.\"unique\", il.origin, ii.name \
-             FROM {master} m JOIN pragma_index_list(m.name, ?1) il JOIN pragma_index_xinfo(il.name, ?1) ii \
-             WHERE ({filter}) AND ii.key = 1 ORDER BY m.name, il.name, ii.seqno"
-        )))
-        .bind(db)
-        .bind(table)
-        .fetch_all(&mut *conn)
-        .await?;
-        for (t, name, unique, origin, col) in idx {
-            let Some(&ix) = index.get(&t) else { continue };
-            let ts = &mut out[ix];
-            let col = col.unwrap_or_else(|| "(expression)".into());
-            match ts.indexes.iter_mut().find(|i| i.name == name) {
-                Some(i) => i.columns.push(col),
-                None => ts.indexes.push(IndexDef { name, columns: vec![col], unique: unique != 0, primary: origin == "pk", method: None }),
-            }
-        }
-        type FkRow = (String, i64, String, String, Option<String>, String, String);
-        let fks: Vec<FkRow> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT m.name, fk.id, fk.\"table\", fk.\"from\", fk.\"to\", fk.on_update, fk.on_delete \
-             FROM {master} m JOIN pragma_foreign_key_list(m.name, ?1) fk WHERE {filter} ORDER BY m.name, fk.id, fk.seq"
-        )))
-        .bind(db)
-        .bind(table)
-        .fetch_all(&mut *conn)
-        .await?;
-        for (t, id, ref_table, from, to, on_update, on_delete) in fks {
-            let Some(&ix) = index.get(&t) else { continue };
-            let name = format!("fk_{t}_{id}");
-            let to = match to {
-                Some(c) => c,
-                // FOREIGN KEY ... REFERENCES t (no columns) targets the primary key.
-                None => sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info(?1, ?2) WHERE pk > 0 ORDER BY pk")
-                    .bind(&ref_table)
-                    .bind(db)
-                    .fetch_all(&mut *conn)
-                    .await?
-                    .into_iter()
-                    .nth(out[ix].foreign_keys.iter().find(|f| f.name == name).map(|f| f.columns.len()).unwrap_or(0))
-                    .unwrap_or_default(),
-            };
-            let ts = &mut out[ix];
-            match ts.foreign_keys.iter_mut().find(|f| f.name == name) {
-                Some(f) => {
-                    f.columns.push(from);
-                    f.ref_columns.push(to);
-                }
-                None => ts.foreign_keys.push(ForeignKeyDef {
-                    name,
-                    columns: vec![from],
-                    ref_schema: None,
-                    ref_table,
-                    ref_columns: vec![to],
-                    on_update: Some(on_update),
-                    on_delete: Some(on_delete),
-                }),
-            }
-        }
-        Ok(out)
+        Ok(qy.fetch_all(&mut *self).await?.iter().map(convert_row).collect())
     }
+}
+
+/// `main` unless a database is named.
+pub(super) fn db_of(t: Option<&str>) -> &str {
+    t.map(str::trim).filter(|d| !d.is_empty()).unwrap_or("main")
+}
+
+fn txt(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn opt_txt(v: &Value) -> Option<String> {
+    (!v.is_null()).then(|| txt(v))
+}
+
+fn int(v: &Value) -> i64 {
+    match v {
+        Value::Number(n) => n.as_i64().unwrap_or_else(|| n.as_f64().unwrap_or_default() as i64),
+        Value::String(s) => s.trim().parse().unwrap_or_default(),
+        Value::Bool(b) => i64::from(*b),
+        _ => 0,
+    }
+}
+
+fn s(v: &str) -> Value {
+    Value::String(v.to_string())
+}
+
+fn opt(v: Option<&str>) -> Value {
+    v.map(s).unwrap_or(Value::Null)
+}
+
+pub(super) async fn server_version(c: &mut (impl Rows + ?Sized)) -> AppResult<String> {
+    let v = c.rows("SELECT sqlite_version()", &[]).await?;
+    Ok(v.first().and_then(|r| r.first()).map(txt).unwrap_or_default())
+}
+
+pub(super) async fn list_databases(c: &mut (impl Rows + ?Sized)) -> AppResult<Vec<String>> {
+    Ok(c.rows("SELECT name FROM pragma_database_list WHERE name <> 'temp' ORDER BY seq", &[]).await?.iter().map(|r| txt(&r[0])).collect())
+}
+
+/// The primary key's columns, in key order.
+pub(super) async fn primary_key(c: &mut (impl Rows + ?Sized), db: &str, table: &str) -> AppResult<Vec<String>> {
+    Ok(c.rows("SELECT name FROM pragma_table_info(?1, ?2) WHERE pk > 0 ORDER BY pk", &[s(table), s(db)])
+        .await?
+        .iter()
+        .map(|r| txt(&r[0]))
+        .collect())
+}
+
+/// Declared type of each column, upper-cased.
+pub(super) async fn column_types(c: &mut (impl Rows + ?Sized), db: &str, table: &str) -> AppResult<HashMap<String, String>> {
+    Ok(c.rows("SELECT name, upper(type) FROM pragma_table_xinfo(?1, ?2)", &[s(table), s(db)])
+        .await?
+        .iter()
+        .map(|r| (txt(&r[0]), txt(&r[1])))
+        .collect())
+}
+
+pub(super) async fn structures(c: &mut (impl Rows + ?Sized), db: &str, table: Option<&str>) -> AppResult<Vec<TableStructure>> {
+    let master = format!("{}.sqlite_master", q(db));
+    let tables = c
+        .rows(
+            &format!(
+                "SELECT name, sql FROM {master} WHERE (?1 IS NULL AND type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\') \
+                 OR (name = ?1 AND type IN ('table', 'view')) ORDER BY name"
+            ),
+            &[opt(table)],
+        )
+        .await?;
+    let mut out: Vec<TableStructure> = Vec::with_capacity(tables.len());
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut autoinc: HashMap<String, bool> = HashMap::new();
+    for r in tables {
+        let name = txt(&r[0]);
+        index.insert(name.clone(), out.len());
+        autoinc.insert(name.clone(), txt(&r[1]).to_ascii_uppercase().contains("AUTOINCREMENT"));
+        out.push(TableStructure { table: Some(TableRef { database: Some(db.to_string()), schema: None, name }), ..Default::default() });
+    }
+    if out.is_empty() {
+        return Ok(out);
+    }
+    let filter = "(?2 IS NULL AND m.type = 'table' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\') OR (m.name = ?2 AND m.type IN ('table', 'view'))";
+    let cols = c
+        .rows(
+            &format!(
+                "SELECT m.name, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk, p.hidden \
+                 FROM {master} m JOIN pragma_table_xinfo(m.name, ?1) p WHERE {filter} ORDER BY m.name, p.cid"
+            ),
+            &[s(db), opt(table)],
+        )
+        .await?;
+    let mut pk_count: HashMap<String, usize> = HashMap::new();
+    for c in cols.iter().filter(|c| int(&c[5]) > 0) {
+        *pk_count.entry(txt(&c[0])).or_default() += 1;
+    }
+    for r in cols {
+        let (t, name, ty, notnull, default, pk, hidden) = (txt(&r[0]), txt(&r[1]), txt(&r[2]), int(&r[3]), opt_txt(&r[4]), int(&r[5]), int(&r[6]));
+        let Some(&ix) = index.get(&t) else { continue };
+        // INTEGER PRIMARY KEY is an alias of the rowid and auto-assigned.
+        let rowid_alias = pk > 0 && pk_count.get(&t) == Some(&1) && ty.eq_ignore_ascii_case("INTEGER");
+        let ts = &mut out[ix];
+        let default = match hidden {
+            2 | 3 => Some(format!("GENERATED ALWAYS AS (...) {}", if hidden == 3 { "STORED" } else { "VIRTUAL" })),
+            _ => default,
+        };
+        ts.columns.push(ColumnDef {
+            name,
+            data_type: ty,
+            nullable: notnull == 0 && pk == 0,
+            default,
+            is_primary_key: pk > 0,
+            auto_increment: rowid_alias || (pk > 0 && autoinc.get(&t) == Some(&true)),
+            comment: None,
+            ordinal: ts.columns.len() as u32 + 1,
+        });
+    }
+    let idx = c
+        .rows(
+            &format!(
+                "SELECT m.name, il.name, il.\"unique\", il.origin, ii.name \
+                 FROM {master} m JOIN pragma_index_list(m.name, ?1) il JOIN pragma_index_xinfo(il.name, ?1) ii \
+                 WHERE ({filter}) AND ii.key = 1 ORDER BY m.name, il.name, ii.seqno"
+            ),
+            &[s(db), opt(table)],
+        )
+        .await?;
+    for r in idx {
+        let (t, name, unique, origin, col) = (txt(&r[0]), txt(&r[1]), int(&r[2]), txt(&r[3]), opt_txt(&r[4]));
+        let Some(&ix) = index.get(&t) else { continue };
+        let ts = &mut out[ix];
+        let col = col.unwrap_or_else(|| "(expression)".into());
+        match ts.indexes.iter_mut().find(|i| i.name == name) {
+            Some(i) => i.columns.push(col),
+            None => ts.indexes.push(IndexDef { name, columns: vec![col], unique: unique != 0, primary: origin == "pk", method: None }),
+        }
+    }
+    let fks = c
+        .rows(
+            &format!(
+                "SELECT m.name, fk.id, fk.\"table\", fk.\"from\", fk.\"to\", fk.on_update, fk.on_delete \
+                 FROM {master} m JOIN pragma_foreign_key_list(m.name, ?1) fk WHERE {filter} ORDER BY m.name, fk.id, fk.seq"
+            ),
+            &[s(db), opt(table)],
+        )
+        .await?;
+    for r in fks {
+        let (t, id, ref_table, from, to, on_update, on_delete) = (txt(&r[0]), int(&r[1]), txt(&r[2]), txt(&r[3]), opt_txt(&r[4]), txt(&r[5]), txt(&r[6]));
+        let Some(&ix) = index.get(&t) else { continue };
+        let name = format!("fk_{t}_{id}");
+        let to = match to {
+            Some(c) => c,
+            // FOREIGN KEY ... REFERENCES t (no columns) targets the primary key.
+            None => primary_key(c, db, &ref_table)
+                .await?
+                .into_iter()
+                .nth(out[ix].foreign_keys.iter().find(|f| f.name == name).map(|f| f.columns.len()).unwrap_or(0))
+                .unwrap_or_default(),
+        };
+        let ts = &mut out[ix];
+        match ts.foreign_keys.iter_mut().find(|f| f.name == name) {
+            Some(f) => {
+                f.columns.push(from);
+                f.ref_columns.push(to);
+            }
+            None => ts.foreign_keys.push(ForeignKeyDef {
+                name,
+                columns: vec![from],
+                ref_schema: None,
+                ref_table,
+                ref_columns: vec![to],
+                on_update: Some(on_update),
+                on_delete: Some(on_delete),
+            }),
+        }
+    }
+    Ok(out)
+}
+
+pub(super) async fn table_structure(c: &mut (impl Rows + ?Sized), table: &TableRef) -> AppResult<TableStructure> {
+    let db = db_of(table.database.as_deref().or(table.schema.as_deref())).to_string();
+    structures(c, &db, Some(&table.name))
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::msg(format!("Table \"{}\" not found", table.name)))
+}
+
+pub(super) async fn children(c: &mut (impl Rows + ?Sized), path: &[String]) -> AppResult<Vec<TreeNode>> {
+    match path {
+        [] => {
+            let dbs = c.rows("SELECT seq, name, file FROM pragma_database_list WHERE name <> 'temp'", &[]).await?;
+            Ok(dbs
+                .into_iter()
+                .map(|r| {
+                    let (name, file) = (txt(&r[1]), txt(&r[2]));
+                    TreeNode {
+                        path: vec![name.clone()],
+                        label: name,
+                        kind: NodeKind::Database,
+                        has_children: true,
+                        detail: (!file.is_empty()).then_some(file),
+                        table: None,
+                    }
+                })
+                .collect())
+        }
+        [_] => Ok(vec![
+            folder(path, "tables", "Tables"),
+            folder(path, "views", "Views"),
+            folder(path, "indexes", "Indexes"),
+            folder(path, "triggers", "Triggers"),
+        ]),
+        [db, f] => {
+            let ty = match f.as_str() {
+                "tables" => "table",
+                "views" => "view",
+                "indexes" => "index",
+                "triggers" => "trigger",
+                other => return Err(AppError::msg(format!("Unknown folder \"{other}\""))),
+            };
+            let rows = c
+                .rows(
+                    &format!(
+                        "SELECT name, tbl_name FROM {}.sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
+                        q(db)
+                    ),
+                    &[s(ty)],
+                )
+                .await?;
+            Ok(rows
+                .into_iter()
+                .map(|r| {
+                    let (name, tbl) = (txt(&r[0]), txt(&r[1]));
+                    match ty {
+                        "table" => TreeNode {
+                            path: [path, &[name.clone()]].concat(),
+                            label: name.clone(),
+                            kind: NodeKind::Table,
+                            has_children: true,
+                            detail: None,
+                            table: Some(tref(db, &name)),
+                        },
+                        "view" => leaf(path, &name, NodeKind::View, None, Some(tref(db, &name))),
+                        "index" => leaf(path, &name, NodeKind::Index, Some(tbl), Some(tref(db, &name))),
+                        _ => leaf(path, &name, NodeKind::Trigger, Some(tbl), Some(tref(db, &name))),
+                    }
+                })
+                .collect())
+        }
+        [_, f, _] if f == "tables" => Ok(vec![
+            folder(path, "columns", "Columns"),
+            folder(path, "indexes", "Indexes"),
+            folder(path, "foreign_keys", "Foreign Keys"),
+            folder(path, "triggers", "Triggers"),
+        ]),
+        [db, f, table, sub] if f == "tables" => {
+            if sub == "triggers" {
+                let names = c
+                    .rows(&format!("SELECT name FROM {}.sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 ORDER BY name", q(db)), &[s(table)])
+                    .await?;
+                return Ok(names.iter().map(|r| txt(&r[0])).map(|n| leaf(path, &n, NodeKind::Trigger, None, Some(tref(db, &n)))).collect());
+            }
+            let st = structures(c, db, Some(table)).await?.into_iter().next().unwrap_or_default();
+            Ok(match sub.as_str() {
+                "columns" => st
+                    .columns
+                    .iter()
+                    .map(|c| {
+                        let mut d = c.data_type.clone();
+                        if c.is_primary_key {
+                            d.push_str(" PK");
+                        }
+                        if !c.nullable && !c.is_primary_key {
+                            d.push_str(" NOT NULL");
+                        }
+                        leaf(path, &c.name, NodeKind::Column, Some(d.trim().to_string()), None)
+                    })
+                    .collect(),
+                "indexes" => st
+                    .indexes
+                    .iter()
+                    .map(|i| {
+                        let d = format!(
+                            "{}({})",
+                            if i.primary { "PRIMARY " } else if i.unique { "UNIQUE " } else { "" },
+                            i.columns.join(", ")
+                        );
+                        leaf(path, &i.name, NodeKind::Index, Some(d), Some(tref(db, &i.name)))
+                    })
+                    .collect(),
+                "foreign_keys" => st
+                    .foreign_keys
+                    .iter()
+                    .map(|f| {
+                        let d = format!("({}) → {}({})", f.columns.join(", "), f.ref_table, f.ref_columns.join(", "));
+                        leaf(path, &f.name, NodeKind::ForeignKey, Some(d), None)
+                    })
+                    .collect(),
+                other => return Err(AppError::msg(format!("Unknown folder \"{other}\""))),
+            })
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+pub(super) async fn object_ddl(c: &mut (impl Rows + ?Sized), table: &TableRef, kind: &NodeKind) -> AppResult<String> {
+    let db = db_of(table.database.as_deref().or(table.schema.as_deref())).to_string();
+    let ty = match kind {
+        NodeKind::Table => "table",
+        NodeKind::View => "view",
+        NodeKind::Index => "index",
+        NodeKind::Trigger => "trigger",
+        other => return Err(AppError::Unsupported(format!("DDL for {other:?}"))),
+    };
+    let master = format!("{}.sqlite_master", q(&db));
+    let sql = c
+        .rows(&format!("SELECT sql FROM {master} WHERE type = ?1 AND name = ?2"), &[s(ty), s(&table.name)])
+        .await?
+        .first()
+        .and_then(|r| opt_txt(&r[0]));
+    let sql = sql.ok_or_else(|| AppError::msg(format!("No definition found for {ty} \"{}\" (auto-created objects have none)", table.name)))?;
+    let mut ddl = format!("{};\n", sql.trim_end().trim_end_matches(';'));
+    if ty == "table" {
+        let extra = c
+            .rows(
+                &format!(
+                    "SELECT sql FROM {master} WHERE tbl_name = ?1 AND type IN ('index', 'trigger') AND sql IS NOT NULL \
+                     ORDER BY type = 'trigger', name"
+                ),
+                &[s(&table.name)],
+            )
+            .await?;
+        for e in extra {
+            ddl.push_str(&format!("\n{};\n", txt(&e[0]).trim_end().trim_end_matches(';')));
+        }
+    }
+    Ok(ddl)
+}
+
+pub(super) async fn schema_snapshot(c: &mut (impl Rows + ?Sized), database: Option<&str>, schema: Option<&str>) -> AppResult<SchemaSnapshot> {
+    let db = db_of(database.or(schema)).to_string();
+    let tables = structures(c, &db, None).await?;
+    let views = c.rows(&format!("SELECT name, sql FROM {}.sqlite_master WHERE type = 'view' ORDER BY name", q(&db)), &[]).await?;
+    Ok(SchemaSnapshot { tables, views: views.into_iter().map(|r| (tref(&db, &txt(&r[0])), txt(&r[1]))).collect() })
 }
 
 fn convert_row(row: &SqliteRow) -> Vec<Value> {
@@ -310,7 +575,7 @@ fn leaf(base: &[String], name: &str, kind: NodeKind, detail: Option<String>, tab
     TreeNode { path, label: name.into(), kind, has_children: false, detail, table }
 }
 
-fn tref(db: &str, name: &str) -> TableRef {
+pub(super) fn tref(db: &str, name: &str) -> TableRef {
     TableRef { database: Some(db.into()), schema: None, name: name.into() }
 }
 
@@ -326,132 +591,17 @@ impl Driver for SqliteDriver {
     async fn server_version(&self) -> AppResult<String> {
         let mut g = self.lock().await?;
         let conn = g.as_mut().expect("checked");
-        let v: String = sqlx::query_scalar("SELECT sqlite_version()").fetch_one(&mut *conn).await?;
-        Ok(format!("SQLite {v}"))
+        Ok(format!("SQLite {}", server_version(conn).await?))
     }
 
     async fn children(&self, path: &[String]) -> AppResult<Vec<TreeNode>> {
         let mut g = self.lock().await?;
-        let conn = g.as_mut().expect("checked");
-        match path {
-            [] => {
-                let dbs: Vec<(i64, String, String)> = sqlx::query_as("SELECT seq, name, file FROM pragma_database_list WHERE name <> 'temp'")
-                    .fetch_all(&mut *conn)
-                    .await?;
-                Ok(dbs
-                    .into_iter()
-                    .map(|(_, name, file)| TreeNode {
-                        path: vec![name.clone()],
-                        label: name,
-                        kind: NodeKind::Database,
-                        has_children: true,
-                        detail: (!file.is_empty()).then_some(file),
-                        table: None,
-                    })
-                    .collect())
-            }
-            [_] => Ok(vec![
-                folder(path, "tables", "Tables"),
-                folder(path, "views", "Views"),
-                folder(path, "indexes", "Indexes"),
-                folder(path, "triggers", "Triggers"),
-            ]),
-            [db, f] => {
-                let ty = match f.as_str() {
-                    "tables" => "table",
-                    "views" => "view",
-                    "indexes" => "index",
-                    "triggers" => "trigger",
-                    other => return Err(AppError::msg(format!("Unknown folder \"{other}\""))),
-                };
-                let rows: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(format!(
-                    "SELECT name, tbl_name FROM {}.sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
-                    q(db)
-                )))
-                .bind(ty)
-                .fetch_all(&mut *conn)
-                .await?;
-                Ok(rows
-                    .into_iter()
-                    .map(|(name, tbl)| match ty {
-                        "table" => TreeNode {
-                            path: [path, &[name.clone()]].concat(),
-                            label: name.clone(),
-                            kind: NodeKind::Table,
-                            has_children: true,
-                            detail: None,
-                            table: Some(tref(db, &name)),
-                        },
-                        "view" => leaf(path, &name, NodeKind::View, None, Some(tref(db, &name))),
-                        "index" => leaf(path, &name, NodeKind::Index, Some(tbl), Some(tref(db, &name))),
-                        _ => leaf(path, &name, NodeKind::Trigger, Some(tbl), Some(tref(db, &name))),
-                    })
-                    .collect())
-            }
-            [_, f, _] if f == "tables" => Ok(vec![
-                folder(path, "columns", "Columns"),
-                folder(path, "indexes", "Indexes"),
-                folder(path, "foreign_keys", "Foreign Keys"),
-                folder(path, "triggers", "Triggers"),
-            ]),
-            [db, f, table, sub] if f == "tables" => {
-                if sub == "triggers" {
-                    let names: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
-                        "SELECT name FROM {}.sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 ORDER BY name",
-                        q(db)
-                    )))
-                    .bind(table)
-                    .fetch_all(&mut *conn)
-                    .await?;
-                    return Ok(names.iter().map(|n| leaf(path, n, NodeKind::Trigger, None, Some(tref(db, n)))).collect());
-                }
-                let st = self.structures(conn, db, Some(table)).await?.into_iter().next().unwrap_or_default();
-                Ok(match sub.as_str() {
-                    "columns" => st
-                        .columns
-                        .iter()
-                        .map(|c| {
-                            let mut d = c.data_type.clone();
-                            if c.is_primary_key {
-                                d.push_str(" PK");
-                            }
-                            if !c.nullable && !c.is_primary_key {
-                                d.push_str(" NOT NULL");
-                            }
-                            leaf(path, &c.name, NodeKind::Column, Some(d.trim().to_string()), None)
-                        })
-                        .collect(),
-                    "indexes" => st
-                        .indexes
-                        .iter()
-                        .map(|i| {
-                            let d = format!(
-                                "{}({})",
-                                if i.primary { "PRIMARY " } else if i.unique { "UNIQUE " } else { "" },
-                                i.columns.join(", ")
-                            );
-                            leaf(path, &i.name, NodeKind::Index, Some(d), Some(tref(db, &i.name)))
-                        })
-                        .collect(),
-                    "foreign_keys" => st
-                        .foreign_keys
-                        .iter()
-                        .map(|f| {
-                            let d = format!("({}) → {}({})", f.columns.join(", "), f.ref_table, f.ref_columns.join(", "));
-                            leaf(path, &f.name, NodeKind::ForeignKey, Some(d), None)
-                        })
-                        .collect(),
-                    other => return Err(AppError::msg(format!("Unknown folder \"{other}\""))),
-                })
-            }
-            _ => Ok(vec![]),
-        }
+        children(g.as_mut().expect("checked"), path).await
     }
 
     async fn list_databases(&self) -> AppResult<Vec<String>> {
         let mut g = self.lock().await?;
-        let conn = g.as_mut().expect("checked");
-        Ok(sqlx::query_scalar("SELECT name FROM pragma_database_list WHERE name <> 'temp' ORDER BY seq").fetch_all(&mut *conn).await?)
+        list_databases(g.as_mut().expect("checked")).await
     }
 
     async fn execute(&self, script: &str, opts: &ExecOptions) -> AppResult<Vec<QueryResult>> {
@@ -491,11 +641,7 @@ impl Driver for SqliteDriver {
         }
         let mut g = self.lock().await?;
         let conn = g.as_mut().expect("checked");
-        let pk: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?1, ?2) WHERE pk > 0 ORDER BY pk")
-            .bind(&req.table.name)
-            .bind(&db)
-            .fetch_all(&mut *conn)
-            .await?;
+        let pk = primary_key(conn, &db, &req.table.name).await?;
         let sql = sc::select_page_sql(D, &table, filter, &req.sort, &pk, req.limit.max(1), req.offset);
         let result = Self::run_statement(conn, &sql, usize::MAX).await.map_err(|e| AppError::msg(sqlite_error_text(&e)))?;
         let total: i64 = sqlx::query_scalar(AssertSqlSafe(sc::count_sql(D, &table, filter))).fetch_one(&mut *conn).await?;
@@ -503,14 +649,8 @@ impl Driver for SqliteDriver {
     }
 
     async fn table_structure(&self, table: &TableRef) -> AppResult<TableStructure> {
-        let db = self.db_of(table.database.as_deref().or(table.schema.as_deref())).to_string();
         let mut g = self.lock().await?;
-        let conn = g.as_mut().expect("checked");
-        self.structures(conn, &db, Some(&table.name))
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| AppError::msg(format!("Table \"{}\" not found", table.name)))
+        table_structure(g.as_mut().expect("checked"), table).await
     }
 
     async fn apply_changes(&self, table: &TableRef, changes: &[RowChange]) -> AppResult<u64> {
@@ -524,13 +664,7 @@ impl Driver for SqliteDriver {
         let t = tref(&db, &table.name);
         let mut g = self.lock().await?;
         let conn = g.as_mut().expect("checked");
-        let types: HashMap<String, String> = sqlx::query_as::<_, (String, String)>("SELECT name, upper(type) FROM pragma_table_xinfo(?1, ?2)")
-            .bind(&table.name)
-            .bind(&db)
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .collect();
+        let types = column_types(conn, &db, &table.name).await?;
         let mut tx = conn.begin().await?;
         let mut total = 0u64;
         for (n, change) in changes.iter().enumerate() {
@@ -571,50 +705,13 @@ impl Driver for SqliteDriver {
     }
 
     async fn object_ddl(&self, table: &TableRef, kind: &NodeKind) -> AppResult<String> {
-        let db = self.db_of(table.database.as_deref().or(table.schema.as_deref())).to_string();
-        let ty = match kind {
-            NodeKind::Table => "table",
-            NodeKind::View => "view",
-            NodeKind::Index => "index",
-            NodeKind::Trigger => "trigger",
-            other => return Err(AppError::Unsupported(format!("DDL for {other:?}"))),
-        };
         let mut g = self.lock().await?;
-        let conn = g.as_mut().expect("checked");
-        let master = format!("{}.sqlite_master", q(&db));
-        let sql: Option<String> = sqlx::query_scalar(AssertSqlSafe(format!("SELECT sql FROM {master} WHERE type = ?1 AND name = ?2")))
-            .bind(ty)
-            .bind(&table.name)
-            .fetch_optional(&mut *conn)
-            .await?
-            .flatten();
-        let sql = sql.ok_or_else(|| AppError::msg(format!("No definition found for {ty} \"{}\" (auto-created objects have none)", table.name)))?;
-        let mut ddl = format!("{};\n", sql.trim_end().trim_end_matches(';'));
-        if ty == "table" {
-            let extra: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
-                "SELECT sql FROM {master} WHERE tbl_name = ?1 AND type IN ('index', 'trigger') AND sql IS NOT NULL \
-                 ORDER BY type = 'trigger', name"
-            )))
-            .bind(&table.name)
-            .fetch_all(&mut *conn)
-            .await?;
-            for e in extra {
-                ddl.push_str(&format!("\n{};\n", e.trim_end().trim_end_matches(';')));
-            }
-        }
-        Ok(ddl)
+        object_ddl(g.as_mut().expect("checked"), table, kind).await
     }
 
     async fn schema_snapshot(&self, database: Option<&str>, schema: Option<&str>) -> AppResult<SchemaSnapshot> {
-        let db = self.db_of(database.or(schema)).to_string();
         let mut g = self.lock().await?;
-        let conn = g.as_mut().expect("checked");
-        let tables = self.structures(conn, &db, None).await?;
-        let views: Vec<(String, Option<String>)> =
-            sqlx::query_as(AssertSqlSafe(format!("SELECT name, sql FROM {}.sqlite_master WHERE type = 'view' ORDER BY name", q(&db))))
-                .fetch_all(&mut *conn)
-                .await?;
-        Ok(SchemaSnapshot { tables, views: views.into_iter().map(|(n, sql)| (tref(&db, &n), sql.unwrap_or_default())).collect() })
+        schema_snapshot(g.as_mut().expect("checked"), database, schema).await
     }
 
     async fn cancel(&self) -> AppResult<()> {

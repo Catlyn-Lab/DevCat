@@ -58,7 +58,7 @@ pub fn init(data_dir: PathBuf) {
     let _ = DATA_DIR.set(data_dir);
 }
 
-fn data_dir() -> AppResult<PathBuf> {
+pub(super) fn data_dir() -> AppResult<PathBuf> {
     DATA_DIR
         .get()
         .cloned()
@@ -427,7 +427,7 @@ pub enum Shell {
 }
 
 /// One command over SSH, with `input` on its stdin: (exit status, stdout, stderr).
-async fn ssh_run(session: &super::ssh::SshSession, command: &str, input: Option<&[u8]>) -> AppResult<(Option<u32>, String, String)> {
+pub(super) async fn ssh_run(session: &super::ssh::SshSession, command: &str, input: Option<&[u8]>) -> AppResult<(Option<u32>, String, String)> {
     use russh::ChannelMsg;
     let mut ch = session.channel_open_session().await.map_err(|e| AppError::msg(format!("SSH: {e}")))?;
     ch.exec(true, command).await.map_err(|e| AppError::msg(format!("SSH: {e}")))?;
@@ -463,7 +463,7 @@ async fn detect_shell(session: &super::ssh::SshSession) -> AppResult<Shell> {
 }
 
 /// `'…'` for a POSIX shell.
-fn sh_quote(s: &str) -> String {
+pub(super) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

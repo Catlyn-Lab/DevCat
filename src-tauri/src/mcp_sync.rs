@@ -623,7 +623,11 @@ fn addresses(c: &ConnectionConfig) -> Vec<String> {
         }
     }
     if let Some(f) = c.file_path.as_deref().map(str::trim).filter(|f| c.kind == ConnectionKind::Sqlite && !f.is_empty()) {
-        out.push(f.to_lowercase());
+        // a file on an SSH host isn't the same path on this computer
+        match c.ssh.as_ref().filter(|s| s.enabled) {
+            Some(s) => out.push(format!("{}:{f}", s.host.trim()).to_lowercase()),
+            None => out.push(f.to_lowercase()),
+        }
     }
     out
 }

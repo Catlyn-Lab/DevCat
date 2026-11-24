@@ -39,7 +39,7 @@ const KINDS = Object.keys(KIND_META) as ConnectionKind[];
 const KIND_BLURB: Record<ConnectionKind, string> = {
   postgres: "PostgreSQL, CockroachDB, Timescale, Supabase",
   mysql: "MySQL, MariaDB, PlanetScale, TiDB",
-  sqlite: "Local database file",
+  sqlite: "Database file, local or over SSH",
   mssql: "Microsoft SQL Server, Azure SQL",
   mongodb: "MongoDB, Atlas, DocumentDB",
   redis: "Redis, Valkey, KeyDB",
@@ -183,8 +183,8 @@ function ConnectionDialogInner({ id, kind, projectId, parentId }: { id: string |
       setSection("general");
       return;
     }
-    if (out.kind === "sqlite" && !out.filePath) {
-      toast.error("Choose a database file");
+    if (out.kind === "sqlite" && !out.filePath?.trim()) {
+      toast.error(out.ssh?.enabled ? "Type the database file's path on the SSH host" : "Choose a database file");
       return;
     }
     if (out.kind === "jdbc" && (!out.url || !out.options.driverJars?.trim())) {
