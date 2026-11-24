@@ -675,6 +675,11 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
     if ghost.is_none() {
         crate::agent_notes::add(&mut tools);
     }
+    // the folder's earlier chats (`chat_search`): where connections are on, since what an agent
+    // read from them (rows, logs) is in those chats too; never in a ghost chat, which keeps nothing
+    if ghost.is_none() && connections {
+        tools.add(devcat_harness::tools::ChatSearch { dir: sessions_dir()?.clone(), cwd: cwd.to_string(), current: Some(id.clone()) });
+    }
     // the rooms the user lets coding agents use (rooms_tools.rs)
     if ghost.is_none() && crate::rooms_tools::allowed_anywhere() {
         for t in crate::rooms_tools::tools("devcat-agent", false) {

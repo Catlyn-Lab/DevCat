@@ -2,7 +2,7 @@
 // items a chat draws, and how those items read (step rows, folded runs of steps). Shared by the
 // desktop chat (./AgentChat.tsx) and the phone / browser version (mobile/src/screens/agentchat.tsx),
 // so nothing here may import Tauri.
-import { AppWindow, Bot, Boxes, Database, DatabaseBackup, DatabaseZap, FileDown, FilePen, FilePlus, FileText, FolderSearch, GitBranch, Globe, ListTodo, MessageCircleQuestion, NotebookPen, Plug, ScrollText, Search, SquareTerminal, StickyNote, Wrench } from "lucide-react";
+import { AppWindow, Bot, Boxes, Database, DatabaseBackup, DatabaseZap, FileDown, FilePen, FilePlus, FileText, FolderSearch, GitBranch, Globe, ListTodo, MessageCircleQuestion, NotebookPen, Plug, ScrollText, Search, SquareTerminal, StickyNote, Wrench, History } from "lucide-react";
 import type { AgentApprovalRequest, AgentBlock, AgentContext, AgentLiveEvent, AgentModel, AgentPolicy, AgentQuestion, AgentSessionEvent, AgentUsage } from "../../lib/types";
 
 export type ToolStatus = "pending" | "approval" | "question" | "running" | "done" | "error" | "denied";
@@ -365,6 +365,7 @@ export function describe(name: string, input: Record<string, unknown> | null, st
     case "edit": { const c = editChanges(i); return { icon: FilePen, verb: done ? "Edited" : "Editing", target: rel(str(i.path), cwd), plus: c.reduce((n, e) => n + lines(e.after), 0), minus: c.reduce((n, e) => n + lines(e.before), 0) }; }
     case "glob": return { icon: FolderSearch, verb: done ? "Found files" : "Finding files", target: str(i.pattern) };
     case "grep": return { icon: Search, verb: done ? "Searched" : "Searching", target: str(i.pattern) };
+    case "chat_search": return { icon: History, verb: done ? "Searched earlier chats" : "Searching earlier chats", target: str(i.query) || (i.session ? "reading one" : "listing them") };
     case "tool_search": return { icon: Search, verb: done ? "Looked for tools" : "Looking for tools", target: str(i.query) };
     case "shell": return { icon: SquareTerminal, verb: done ? "Ran" : "Running", target: str(i.command) };
     case "git": return { icon: GitBranch, verb: done ? "Ran" : "Running", target: `git ${gitArgs(i).map((a) => (/^$|\s/.test(a) ? `"${a}"` : a)).join(" ")}` };

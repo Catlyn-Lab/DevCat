@@ -614,6 +614,10 @@ impl Agent {
 
 Go on from the step marked [>] and keep the list up to date with `todo_write`."));
         }
+        // what the summary leaves out is still in the log, and can be looked up there
+        if self.tools.get(crate::tools::chat_search::CHAT_SEARCH).is_some() {
+            summary.push_str("\n\nDetails left out of this summary (exact output, earlier messages) can still be found with `chat_search`: it searches the part of this chat that was summarized, too.");
+        }
         if mid_turn {
             summary.push_str(MID_TURN);
         }
