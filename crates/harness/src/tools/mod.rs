@@ -5,6 +5,7 @@ pub mod edit;
 pub mod fs;
 pub mod git;
 pub mod shell;
+pub mod skill;
 mod todo;
 mod web;
 
@@ -20,6 +21,7 @@ pub use chat_search::ChatSearch;
 pub use fs::{Edit, Glob, Grep, Read, Write};
 pub use git::Git;
 pub use shell::Shell;
+pub use skill::SkillSave;
 #[cfg(unix)]
 pub(crate) use shell::libc_setsid;
 pub use todo::{TODO_WRITE, TodoWrite};

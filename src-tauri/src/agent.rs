@@ -684,6 +684,11 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
     }
     // the folder's earlier chats (`chat_search`): where connections are on, since what an agent
     // read from them (rows, logs) is in those chats too; never in a ghost chat, which keeps nothing
+    // writing down a procedure as a skill: on this computer (skills are its files, an SSH host's
+    // chat doesn't read them), never in a ghost chat
+    if ghost.is_none() && remote.is_none() {
+        tools.add(devcat_harness::tools::SkillSave { home: home.clone() });
+    }
     if ghost.is_none() && connections {
         tools.add(devcat_harness::tools::ChatSearch { dir: sessions_dir()?.clone(), cwd: cwd.to_string(), current: Some(id.clone()) });
     }

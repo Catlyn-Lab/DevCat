@@ -488,9 +488,10 @@ function ApprovalCard({ item, tabId }: { item: ToolItem; tabId: string }) {
       {item.name === "shell" && <Code>{str(i.command)}</Code>}
       {item.name === "db_query" && <Code>{str(i.query)}</Code>}
       {item.name === "devcat_note_write" && <Code>{str(i.body)}</Code>}
+      {item.name === "skill_save" && <><div className="mb-1 text-[12px] text-muted">{str(i.description)}</div><Code>{str(i.body)}</Code></>}
       {item.name === "edit" && <><div className="mb-1 font-mono text-[11.5px] text-muted">{str(i.path)}</div>{editChanges(i).map((c, n) => <Diff key={n} before={c.before} after={c.after} />)}</>}
       {item.name === "write" && <><div className="mb-1 font-mono text-[11.5px] text-muted">{str(i.path)}</div><Diff before="" after={str(i.content)} max={40} /></>}
-      {!["shell", "edit", "write", "db_query", "devcat_note_write"].includes(item.name) && <Code>{req.summary}</Code>}
+      {!["shell", "edit", "write", "db_query", "devcat_note_write", "skill_save"].includes(item.name) && <Code>{req.summary}</Code>}
       {/* a command a person must always allow: it asks every time, whatever the chat's setting */}
       {req.warning && <div className="mt-2 flex items-start gap-1.5 text-[12.5px] text-danger"><ShieldAlert className="mt-0.5 size-3.5 shrink-0" />{req.warning} It asks every time, whatever this chat's permissions.</div>}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">

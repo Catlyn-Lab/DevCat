@@ -582,7 +582,8 @@ function ApprovalCard({ item, ctx }: { item: ToolItem; ctx: ItemCtx }) {
       {item.name === "write" && <><div className="mb-1 font-mono text-[11.5px] break-all text-muted">{str(i.path)}</div><Diff before="" after={str(i.content)} max={40} /></>}
       {item.name === "db_query" && <Code>{str(i.query)}</Code>}
       {item.name === "devcat_note_write" && <Code>{str(i.body)}</Code>}
-      {!["shell", "edit", "write", "db_query", "devcat_note_write"].includes(item.name) && <Code>{req.summary}</Code>}
+      {item.name === "skill_save" && <><div className="mb-1 text-[12px] text-muted">{str(i.description)}</div><Code>{str(i.body)}</Code></>}
+      {!["shell", "edit", "write", "db_query", "devcat_note_write", "skill_save"].includes(item.name) && <Code>{req.summary}</Code>}
       {ctx.readonly ? (
         <div className="mt-2 text-[12px] text-muted">Waiting for an answer on the computer or a phone with full access.</div>
       ) : req.confirm != null ? (
