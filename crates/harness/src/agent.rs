@@ -49,6 +49,13 @@ const MAX_SQUEEZED: u32 = 3;
 /// it just did.
 const WORTH_COMPACTING: f64 = 0.1;
 
+/// Tool results longer than this many characters may be left out to make room before the
+/// conversation is summarized (see [`Agent::prune`]).
+const PRUNE_ABOVE: usize = 2_000;
+
+/// The newest tool results that are never left out: what the model is working with.
+const PRUNE_KEEP: usize = 8;
+
 /// After a summary that failed, the next automatic one waits this many steps.
 const COMPACT_AGAIN_AFTER: u32 = 5;
 
@@ -740,6 +747,60 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         now.saturating_sub(base) as f64 >= window as f64 * WORTH_COMPACTING
     }
 
+    /// Make room by leaving out old tool results (long ones, but not the newest [`PRUNE_KEEP`]) before
+    /// summarizing: the model keeps the whole conversation in its own words, and gets a note where
+    /// each result was saying where the whole of it is ([`SessionEvent::Pruned`]). Done only when
+    /// it frees enough to go on for a while (a tenth of the window under the limit); returns
+    /// whether it did. (After Hermes Agent's context compressor, MIT.)
+    async fn prune(&self, session: &mut Session, overhead: usize) -> Result<bool> {
+        let (Some(limit), Some(window)) = (self.limit(), self.context_window) else { return Ok(false) };
+        let events = session.events();
+        let from = events.iter().rposition(|e| matches!(e, SessionEvent::Compacted { .. })).map_or(0, |i| i + 1);
+        let done: HashSet<&str> = events.iter().filter_map(|e| if let SessionEvent::Pruned { results } = e { Some(results.iter().map(|r| r.id.as_str())) } else { None }).flatten().collect();
+        let names: HashMap<&str, &str> = events[from..]
+            .iter()
+            .filter_map(|e| if let SessionEvent::Assistant { content, .. } = e { Some(content.iter().filter_map(|b| if let Block::ToolUse { id, name, .. } = b { Some((id.as_str(), name.as_str())) } else { None })) } else { None })
+            .flatten()
+            .collect();
+        let results: Vec<usize> = (from..events.len()).filter(|&i| matches!(events[i], SessionEvent::ToolResults { .. })).collect();
+        let old = &results[..results.len().saturating_sub(PRUNE_KEEP)];
+        let mut picked: Vec<(String, String, String)> = Vec::new();
+        for &i in old {
+            let SessionEvent::ToolResults { results, .. } = &events[i] else { continue };
+            for b in results {
+                if let Block::ToolResult { tool_use_id, content, .. } = b
+                    && content.len() > PRUNE_ABOVE
+                    && !done.contains(tool_use_id.as_str())
+                {
+                    picked.push((tool_use_id.clone(), names.get(tool_use_id.as_str()).copied().unwrap_or("").to_string(), content.clone()));
+                }
+            }
+        }
+        let freed: usize = picked.iter().map(|(_, _, c)| c.len().saturating_sub(300)).sum::<usize>() / 4;
+        let room = (window as f64 * WORTH_COMPACTING) as u64;
+        if picked.is_empty() || self.context_now(session, overhead).saturating_sub(freed as u64) + room > limit {
+            return Ok(false);
+        }
+        let mut pruned = Vec::new();
+        for (id, name, content) in picked {
+            // a file `read` showed is its own copy; anything else is saved to be read again
+            let file = if name == "read" {
+                None
+            } else {
+                match session.save_output(&id, &content).await {
+                    Ok(f) => Some(f.display().to_string()),
+                    Err(_) => continue,
+                }
+            };
+            pruned.push(crate::session::PrunedResult { id, chars: content.chars().count(), file });
+        }
+        if pruned.is_empty() {
+            return Ok(false);
+        }
+        session.append(SessionEvent::Pruned { results: pruned }).await?;
+        Ok(true)
+    }
+
     /// Tell the model something in the user's place (`text`, as the next message), and the chat
     /// that it was told.
     async fn nudge(&self, session: &mut Session, text: &str, on: &mut (dyn FnMut(AgentEvent) + Send)) -> Result<()> {
@@ -852,7 +913,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             if std::mem::take(&mut answered) && read == 0 {
                 return Ok(TurnEnd::Answered);
             }
-            if steps >= compact_from && self.should_compact(session, overhead) {
+            if steps >= compact_from && self.should_compact(session, overhead) && !self.prune(session, overhead).await? {
                 match self.compact_now(session, None, true, true, cancel, on).await {
                     // after a summary the model may need to look at things again
                     Ok(true) => guard.reset(),

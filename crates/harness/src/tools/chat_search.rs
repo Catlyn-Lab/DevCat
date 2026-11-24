@@ -684,7 +684,7 @@ fn render(i: usize, e: &SessionEvent) -> String {
         SessionEvent::Interrupted { reason } => one("turn ended early", reason, TOOL_CHARS),
         SessionEvent::Title { title } => one("title", title, TOOL_CHARS),
         SessionEvent::Compacted { summary, .. } => one("summary of the conversation before", summary, MESSAGE_CHARS),
-        SessionEvent::Meta { .. } | SessionEvent::Approval { .. } => String::new(),
+        SessionEvent::Meta { .. } | SessionEvent::Approval { .. } | SessionEvent::Pruned { .. } | SessionEvent::Unknown => String::new(),
     }
 }
 

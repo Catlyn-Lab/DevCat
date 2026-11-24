@@ -1940,3 +1940,86 @@ async fn a_review_saves_to_memory_and_does_nothing_else() {
     assert!(plain.reviewer(&session).await.unwrap().is_none());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Returns 12,000 characters, different for each input.
+struct Large;
+
+#[async_trait]
+impl Tool for Large {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec { name: "large".into(), description: "fake".into(), input_schema: json!({ "type": "object" }) }
+    }
+    fn kind(&self, _: &Value, _: &ToolCtx) -> Kind {
+        Kind::Read
+    }
+    fn summary(&self, _: &Value) -> String {
+        String::new()
+    }
+    async fn run(&self, input: Value, _: &ToolCtx) -> ToolOutput {
+        ToolOutput::ok(format!("{input}{}", "x".repeat(12_000)))
+    }
+}
+
+/// Answers from a script, and counts the request's tokens as about a quarter of its characters
+/// (as a provider would), so the conversation grows towards the window.
+struct Counting(Mutex<Vec<Vec<Block>>>, Mutex<Vec<String>>);
+
+#[async_trait]
+impl Model for Counting {
+    fn name(&self) -> String {
+        "counting".into()
+    }
+    async fn step(&self, req: &Request<'_>, _: &mut (dyn FnMut(Delta) + Send)) -> devcat_harness::Result<Reply> {
+        let text: String = req.messages.iter().flat_map(|m| &m.content).map(|b| match b {
+            Block::Text { text } => text.clone(),
+            Block::ToolResult { content, .. } => content.clone(),
+            Block::ToolUse { input, .. } => input.to_string(),
+            _ => String::new(),
+        }).collect();
+        self.1.lock().unwrap().push(text.clone());
+        let content = self.0.lock().unwrap().pop().expect("more steps than scripted");
+        Ok(Reply { content, usage: Usage { input_tokens: (text.len() / 4) as u64, output_tokens: 10, cache_read_tokens: 0 }, truncated: false })
+    }
+}
+
+/// Near the limit, old long tool results are left out (with a note saying where they are) before
+/// anything is summarized; the newest stay.
+#[tokio::test]
+async fn old_tool_output_is_left_out_before_the_conversation_is_summarized() {
+    let (dir, mut session) = project().await;
+    let mut steps: Vec<Vec<Block>> = (0..11).map(|n| vec![tool(&format!("b{n}"), "large", json!({ "n": n }))]).collect();
+    steps.push(vec![text("done")]);
+    steps.reverse();
+    let model = Arc::new(Counting(Mutex::new(steps), Mutex::default()));
+    let mut tools = Registry::default();
+    tools.add(Large);
+    let mut agent = Agent::new(model.clone(), tools, Policy::Ask, Arc::new(DenyAll), "s".into());
+    agent.context_window = Some(40_000);
+    agent.turn(&mut session, "look at all of them", &Cancel::default(), &mut |_| {}).await.unwrap();
+    assert!(!session.events().iter().any(|e| matches!(e, SessionEvent::Compacted { .. })), "it summarized");
+    let pruned: Vec<String> = session.events().iter().filter_map(|e| if let SessionEvent::Pruned { results } = e { Some(results.iter().map(|r| r.id.clone())) } else { None }).flatten().collect();
+    assert!(!pruned.is_empty() && pruned.contains(&"b0".to_string()), "{pruned:?}");
+    // the newest ones stay whole
+    assert!(!pruned.iter().any(|id| id == "b10" || id == "b3"), "{pruned:?}");
+    // the model got the note, with where the whole output is
+    let last = model.1.lock().unwrap().last().unwrap().clone();
+    assert!(last.contains("was left out to make room") && last.contains(".out"), "{}", &last[..400.min(last.len())]);
+    // and it's in the log for a chat opened again
+    let again = Session::open(session.path()).await.unwrap();
+    assert!(again.messages().iter().flat_map(|m| &m.content).any(|b| matches!(b, Block::ToolResult { tool_use_id, content, .. } if tool_use_id == "b0" && content.contains("left out"))));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A log with an event this DevCat doesn't know still opens (a newer DevCat wrote it).
+#[tokio::test]
+async fn an_unknown_event_is_skipped() {
+    let (dir, mut session) = project().await;
+    session.append(SessionEvent::user("hi", vec![])).await.unwrap();
+    let mut f = std::fs::OpenOptions::new().append(true).open(session.path()).unwrap();
+    use std::io::Write;
+    writeln!(f, "{{\"ms\":1,\"event\":\"from_the_future\",\"x\":1}}").unwrap();
+    drop(f);
+    let again = Session::open(session.path()).await.unwrap();
+    assert_eq!(again.messages().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}

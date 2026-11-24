@@ -68,6 +68,32 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "is_none")]
         tail: usize,
     },
+    /// Old tool results were left out to make room in the context window: from here on the model
+    /// gets a short note in their place, saying where the whole output is (they stay in the log).
+    Pruned { results: Vec<PrunedResult> },
+    /// An event a newer DevCat wrote that this one doesn't know: skipped, so the chat still opens.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A tool result left out ([`SessionEvent::Pruned`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrunedResult {
+    /// The tool call it answered.
+    pub id: String,
+    /// How long it was (characters).
+    pub chars: usize,
+    /// Where the whole of it is saved; none for a `read` (the file is the copy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// What the model gets in place of a result that was left out.
+pub fn pruned_note(r: &PrunedResult) -> String {
+    match &r.file {
+        Some(f) => format!("[This output ({} characters) was left out to make room in the context window. It's saved in {f}: read parts of it with `read` (offset / limit) or search it with `grep` if you need it again.]", r.chars),
+        None => format!("[This output ({} characters) was left out to make room in the context window. Read the file again if you need it.]", r.chars),
+    }
 }
 
 fn is_none(n: &usize) -> bool {
@@ -327,6 +353,11 @@ impl Session {
     /// a turn that didn't finish says so first ([`interrupted_note`]).
     pub fn messages(&self) -> Vec<Message> {
         let mut p = Projection::default();
+        for e in &self.events {
+            if let SessionEvent::Pruned { results } = e {
+                p.pruned.extend(results.iter().map(|r| (r.id.as_str(), pruned_note(r))));
+            }
+        }
         for (i, e) in self.events.iter().enumerate() {
             match e {
                 SessionEvent::Compacted { summary, kept, tail, .. } => {
@@ -547,6 +578,8 @@ struct Projection<'a> {
     cut: Option<&'a str>,
     /// The user's messages since the model's last step: a compaction may keep them.
     unanswered: Vec<Vec<Block>>,
+    /// Tool results left out ([`SessionEvent::Pruned`]), by call, with the note that stands for each.
+    pruned: std::collections::HashMap<&'a str, String>,
 }
 
 impl<'a> Projection<'a> {
@@ -568,7 +601,18 @@ impl<'a> Projection<'a> {
                 self.unanswered.clear();
                 push(&mut self.out, Role::Assistant, content.clone());
             }
-            SessionEvent::ToolResults { results, .. } => push(&mut self.out, Role::User, results.clone()),
+            SessionEvent::ToolResults { results, .. } => {
+                let results = results
+                    .iter()
+                    .map(|b| match b {
+                        Block::ToolResult { tool_use_id, is_error, .. } if self.pruned.contains_key(tool_use_id.as_str()) => {
+                            Block::ToolResult { tool_use_id: tool_use_id.clone(), content: self.pruned[tool_use_id.as_str()].clone(), is_error: *is_error }
+                        }
+                        b => b.clone(),
+                    })
+                    .collect();
+                push(&mut self.out, Role::User, results)
+            }
             SessionEvent::Interrupted { reason } => self.cut = Some(reason),
             _ => {}
         }
