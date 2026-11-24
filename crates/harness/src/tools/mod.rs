@@ -1,5 +1,6 @@
 //! The tools the agent can call, and the registry that holds them. The agent runs every call
 //! through the same pipeline (see [`crate::agent`]): approval, timeout, output truncation, event.
+pub mod chat_search;
 pub mod edit;
 pub mod fs;
 pub mod git;
@@ -15,6 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use chat_search::ChatSearch;
 pub use fs::{Edit, Glob, Grep, Read, Write};
 pub use git::Git;
 pub use shell::Shell;

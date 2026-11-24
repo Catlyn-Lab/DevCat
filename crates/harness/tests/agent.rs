@@ -440,8 +440,12 @@ async fn the_same_call_over_and_over_is_refused_after_three() {
         })
         .await
         .unwrap();
-    assert_eq!(results.iter().map(|r| r.1).collect::<Vec<_>>(), [false, false, false, true, false, false]);
+    // (the fifth read is refused too, now for another reason: the file hasn't changed, and it
+    // returned the same three times)
+    assert_eq!(results.iter().map(|r| r.1).collect::<Vec<_>>(), [false, false, false, true, false, true]);
     assert!(results[3].0.contains("3 times in a row"), "{}", results[3].0);
+    assert!(results[2].0.contains("[Note: this is what this exact call returned"), "{}", results[2].0);
+    assert!(results[5].0.contains("same result the last 3 times"), "{}", results[5].0);
     let _ = std::fs::remove_dir_all(dir);
 }
 

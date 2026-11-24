@@ -89,6 +89,8 @@ const EMPTY_REPLY: &str = "Your last message was empty. If the task is done, say
 
 const CUT_OFF: &str = "Your message was cut off at the output limit. Go on exactly where it stopped, without repeating what you already wrote.";
 
+const REPEATING: &str = "Your last message got stuck repeating the same text over and over until it hit the output limit. Don't continue it. Say in a sentence or two what you were doing, then go on with the next step or answer.";
+
 const CUT_OFF_CALL: &str = "Not run: your message hit the output limit before this call's arguments were complete. Make the call smaller: write a long file in parts (`write` the first part, then add the rest with `edit`), and put a long script in a file instead of the command line.";
 
 const EMPTY_SUMMARY: &str = "\n\nYour last reply had no text. Write the summary now, as plain text, without calling a tool.";
@@ -104,8 +106,8 @@ refused until the user starts the plan. When you know enough, answer with the pl
 you'd change and how, and anything the user should decide. Keep it short.";
 
 /// The same call (tool and arguments) this many times in a row runs; the next one is refused, so a
-/// model stuck in a loop hears it instead of spending the turn.
-pub const MAX_SAME_CALL: usize = 3;
+/// model stuck in a loop hears it instead of spending the turn (see [`crate::guard`]).
+pub use crate::guard::MAX_SAME_CALL;
 
 /// Helpers (`subagent` calls of one step) that run at the same time; more wait for a free slot.
 pub const MAX_HELPERS: usize = 4;
@@ -771,9 +773,8 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
 
     async fn run(&mut self, session: &mut Session, cancel: &Cancel, on: &mut (dyn FnMut(AgentEvent) + Send)) -> Result<TurnEnd> {
         let ctx = ToolCtx { cwd: session.cwd.clone().into(), sandbox: self.sandbox };
-        // the last call and how many times in a row it was made (repeat guard)
-        let mut last: Option<(String, Value)> = None;
-        let mut same = 0;
+        // what stops a model that's stuck (see `guard.rs`)
+        let mut guard = crate::guard::Guard::default();
         let system = self.system_now();
         // a Stop hook already sent the agent back to work this turn
         let mut stop_hook_active = false;
@@ -834,7 +835,9 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             }
             if steps >= compact_from && self.should_compact(session, overhead) {
                 match self.compact_now(session, None, true, true, cancel, on).await {
-                    Ok(_) => {}
+                    // after a summary the model may need to look at things again
+                    Ok(true) => guard.reset(),
+                    Ok(false) => {}
                     Err(Error::Cancelled) => return Err(Error::Cancelled),
                     // The step may still fit: go on, and try the summary again a few steps later.
                     // If it doesn't fit, the provider says so and it's summarized for that below.
@@ -886,6 +889,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                     };
                     match self.compact_now(session, None, true, keep, cancel, on).await {
                         Ok(true) => {
+                            guard.reset();
                             steps -= 1;
                             continue;
                         }
@@ -925,7 +929,9 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 // (An answer with no text has nothing to go on from: that's the empty one below.)
                 if reply.truncated && !answer.trim().is_empty() && cut_off < MAX_CUT_OFF {
                     cut_off += 1;
-                    self.nudge(session, CUT_OFF, on).await?;
+                    // an answer that ran to the limit repeating itself isn't one to go on with
+                    let ask = if crate::guard::repeating(&answer) { REPEATING } else { CUT_OFF };
+                    self.nudge(session, ask, on).await?;
                     continue;
                 }
                 // Nothing at all (no text, no call): a hiccup of the provider more often than an
@@ -953,19 +959,25 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 return Ok(TurnEnd::Answered);
             }
             (cut_off, told_empty) = (0, false);
-            // the repeat guard, decided before anything runs
-            let mut repeated = HashSet::new();
+            // the guard, decided before anything runs: the calls it refuses, with why
+            let mut repeated: HashMap<String, String> = HashMap::new();
             for (id, name, input) in &calls {
-                let key = (name.clone(), input.clone());
-                same = if last.as_ref() == Some(&key) { same + 1 } else { 1 };
-                last = Some(key);
-                if same > MAX_SAME_CALL {
-                    repeated.insert(id.clone());
+                if let Some(why) = guard.check(name, input) {
+                    repeated.insert(id.clone(), why);
                 }
             }
+            // what each call was, to tell the guard its result
+            let asked: HashMap<String, (String, Value)> = calls.iter().map(|(id, name, input)| (id.clone(), (name.clone(), input.clone()))).collect();
+            let mut noted = |id: &str, out: &mut ToolOutput| {
+                if let Some((name, input)) = asked.get(id)
+                    && let Some(note) = guard.record(name, input, &out.content, out.is_error)
+                {
+                    out.content.push_str(&format!("\n\n{note}"));
+                }
+            };
             // Helpers first, all at once: they only look, so they can't get in the way of the
             // other calls. Each result is reported as soon as it's in.
-            let jobs: Vec<(String, Value)> = calls.iter().filter(|(id, name, _)| name == SUBAGENT && self.helper.is_none() && !repeated.contains(id)).map(|(id, _, input)| (id.clone(), input.clone())).collect();
+            let jobs: Vec<(String, Value)> = calls.iter().filter(|(id, name, _)| name == SUBAGENT && self.helper.is_none() && !repeated.contains_key(id)).map(|(id, _, input)| (id.clone(), input.clone())).collect();
             let mut helped = if cancel.is_cancelled() { HashMap::new() } else { self.helpers(session, jobs, cancel, on).await };
             let mut results = Vec::new();
             let mut usage = Usage::default();
@@ -980,13 +992,14 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             let hooked = self.hooks.has("PostToolUse") || self.hooks.has("PostToolUseFailure");
             let together: Vec<bool> = calls
                 .iter()
-                .map(|(id, name, input)| !hooked && !repeated.contains(id) && input.get(UNPARSED).is_none() && self.tools.get(name).is_some_and(|t| t.concurrent(input, &ctx)))
+                .map(|(id, name, input)| !hooked && !repeated.contains_key(id) && input.get(UNPARSED).is_none() && self.tools.get(name).is_some_and(|t| t.concurrent(input, &ctx)))
                 .collect();
             let mut calls = calls.into_iter().enumerate().peekable();
             while let Some((n, (id, name, input))) = calls.next() {
-                if let Some((out, used, took)) = helped.remove(&id) {
+                if let Some((mut out, used, took)) = helped.remove(&id) {
                     usage += used;
                     took_ms.push(took);
+                    noted(&id, &mut out);
                     results.push(Block::ToolResult { tool_use_id: id, content: out.content, is_error: out.is_error });
                     continue;
                 }
@@ -1018,8 +1031,9 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                         };
                         (id, out, halt, said, started.elapsed().as_millis() as u64)
                     });
-                    for (id, out, halt, said, took) in futures::future::join_all(runs).await {
+                    for (id, mut out, halt, said, took) in futures::future::join_all(runs).await {
                         said.into_iter().for_each(&mut *on);
+                        noted(&id, &mut out);
                         if halt.is_some() && self.halt.is_none() {
                             self.halt = halt;
                         }
@@ -1035,14 +1049,14 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                     ToolOutput::err("Not run: stopped by the user.")
                 } else if self.halt.is_some() {
                     ToolOutput::err("Not run: a hook stopped the agent.")
-                } else if repeated.contains(&id) {
-                    ToolOutput::err(format!(
-                        "Not run: you already made this exact `{name}` call {MAX_SAME_CALL} times in a row. Doing it again won't help: try something different, or tell the user what's in the way."
-                    ))
+                } else if let Some(why) = repeated.remove(&id) {
+                    ToolOutput::err(why)
                 } else if reply.truncated && input.get(UNPARSED).is_some() {
                     ToolOutput::err(CUT_OFF_CALL)
                 } else {
-                    self.call(session, &ctx, &id, &name, input, cancel, on).await?
+                    let mut out = self.call(session, &ctx, &id, &name, input, cancel, on).await?;
+                    noted(&id, &mut out);
+                    out
                 };
                 took_ms.push(started.elapsed().as_millis() as u64);
                 on(AgentEvent::ToolResult { id: id.clone(), content: out.content.clone(), is_error: out.is_error });

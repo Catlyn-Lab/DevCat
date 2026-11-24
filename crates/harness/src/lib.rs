@@ -14,7 +14,10 @@
 
 pub mod agent;
 pub mod approval;
+pub mod checkpoint;
 pub mod commands;
+pub mod danger;
+pub mod guard;
 pub mod hooks;
 pub mod llm;
 pub mod mcp;
