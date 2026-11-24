@@ -1309,6 +1309,11 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             let answer = if session.messages().last().is_some_and(|m| m.role == Role::Assistant) { answer_of(session.events()) } else { String::new() };
             // when it didn't get to answer: the last thing it said, so its work isn't lost
             let so_far = || Some(answer_of(session.events())).filter(|t| !t.is_empty()).map(|t| format!(" What it had so far:\n\n{t}")).unwrap_or_default();
+            let ended = match &res {
+                Ok(TurnEnd::Answered) => "answered",
+                Ok(TurnEnd::StepLimit) => "ran out of steps",
+                Err(_) => "stopped early",
+            };
             let out = match res {
                 Ok(TurnEnd::Answered) if !answer.is_empty() => ToolOutput::ok(answer),
                 Ok(TurnEnd::Answered) => ToolOutput::err("The helper finished without an answer."),
@@ -1321,6 +1326,16 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 Err(e) => ToolOutput::err(format!("The helper stopped: {e}.{}", so_far())),
             };
             let mut out = out;
+            // how it went, for the agent that asked: so it knows what the answer rests on, and
+            // doesn't read again what the helper read
+            if !cancel.is_cancelled() {
+                let steps = session.events().iter().filter(|e| matches!(e, SessionEvent::Assistant { .. })).count();
+                let how = if ended == "answered" && out.is_error { "stopped early" } else { ended };
+                let u = session.usage();
+                let (_, read) = files_of(&session);
+                let files = if read.is_empty() { String::new() } else { format!(" Files it read: {}.", read.join(", ")) };
+                out.content.push_str(&format!("\n\n[Helper {how}: {steps} steps, {} tokens.{files}]", u.input_tokens + u.output_tokens));
+            }
             // PostToolUse hooks on the call, with the helper's answer
             let event = if out.is_error { "PostToolUseFailure" } else { "PostToolUse" };
             if self.hooks.has(event) {

@@ -688,8 +688,12 @@ async fn helpers_run_at_the_same_time_only_look_and_count_for_the_chat() {
         _ => None,
     }).collect();
     assert_eq!(results.len(), 2, "one result per helper: {results:?}");
-    assert!(results.contains(&("h1".into(), "In notes.txt: version = 1.".into(), false)));
-    assert!(results.contains(&("h2".into(), "No tests.".into(), false)));
+    let of = |id: &str| results.iter().find(|r| r.0 == id).cloned().unwrap();
+    // the answer, then how the helper went and what it read
+    let (_, h1, err) = of("h1");
+    assert!(!err && h1.starts_with("In notes.txt: version = 1.\n\n[Helper answered: 2 steps,") && h1.ends_with("Files it read: notes.txt.]"), "{h1}");
+    let (_, h2, err) = of("h2");
+    assert!(!err && h2.starts_with("No tests.\n\n[Helper answered:") && !h2.contains("Files it read"), "{h2}");
     // what the helpers did shows on their cards, and their tokens count
     let did: Vec<(String, String)> = events.iter().filter_map(|e| match e {
         AgentEvent::HelperTool { id, name, .. } => Some((id.clone(), name.clone())),
