@@ -9,7 +9,8 @@ import { chatTabTitle } from "../claude/open";
 import { useTabs } from "../../store/tabs";
 import { WINDOW_LABEL } from "../../lib/windows";
 import type { AiProvider, AgentModel, AgentDecision, AgentLiveEvent, AgentPolicy } from "../../lib/types";
-import { ZERO, applyAll, contextWindow, itemsFromLog, lastContext, type ChatView } from "./model";
+import { CHECKPOINT, ZERO, applyAll, contextWindow, itemsFromLog, lastContext, type ChatView } from "./model";
+import { confirmDialog } from "../connections/dialogs";
 
 export { contextWindow, type Item, type ToolStatus } from "./model";
 
@@ -328,6 +329,40 @@ export async function editMessage(tabId: string, key: string) {
     useTabs.getState().update(tabId, { sessionId: id } as never);
     lastSeq.delete(old);
     await api.agentClose(old).catch(() => {});
+  } catch (e) {
+    patch(tabId, () => ({ error: errMsg(e) }));
+  }
+}
+
+/** Put the chat folder's files back to how they were before one of the user's messages (`key`: its
+ *  item), after showing what that changes. The agent is told with the next message. */
+export async function restoreFiles(tabId: string, key: string) {
+  const c = useAgent.getState().chats[tabId];
+  if (!c?.sessionId || c.busy) return;
+  const at = c.items.findIndex((i) => i.key === key);
+  const it = c.items[at];
+  if (!it || it.kind !== "user") return;
+  const nth = c.items.slice(0, at).filter((i) => i.kind === "user" && !i.queued && i.text === it.text).length;
+  const note = (text: string) => patch(tabId, (ch) => ({ items: [...ch.items, { kind: "hook", key: `restore-${Date.now()}`, event: CHECKPOINT, text }] }));
+  try {
+    const preview = await api.agentRestore(c.sessionId, it.text, nth, true);
+    if (preview.files.length === 0) {
+      note("The files are as they were before that message already: nothing to put back.");
+      return;
+    }
+    const verb = { added: "deleted (added since)", modified: "put back", deleted: "brought back" } as const;
+    const shown = preview.files.slice(0, 40).map(([p, s]) => `${p} — ${verb[s]}`).join("\n");
+    const more = preview.files.length > 40 ? `\n… and ${preview.files.length - 40} more` : "";
+    const ok = await confirmDialog({
+      title: `Put ${preview.files.length} file${preview.files.length === 1 ? "" : "s"} back?`,
+      message: "The project's files go back to how they were before this message: what the agent (and you) changed in them since is undone. The chat stays as it is, and the files as they are now are saved first, so this can be undone too.",
+      code: shown + more,
+      confirmLabel: "Put back",
+      danger: true,
+    });
+    if (!ok) return;
+    const done = await api.agentRestore(c.sessionId, it.text, nth, false);
+    note(`Put ${done.files.length} file${done.files.length === 1 ? "" : "s"} back to how they were before “${it.text.slice(0, 60)}${it.text.length > 60 ? "…" : ""}”. The agent hears it with your next message.`);
   } catch (e) {
     patch(tabId, () => ({ error: errMsg(e) }));
   }

@@ -68,6 +68,32 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "is_none")]
         tail: usize,
     },
+    /// Old tool results were left out to make room in the context window: from here on the model
+    /// gets a short note in their place, saying where the whole output is (they stay in the log).
+    Pruned { results: Vec<PrunedResult> },
+    /// An event a newer DevCat wrote that this one doesn't know: skipped, so the chat still opens.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A tool result left out ([`SessionEvent::Pruned`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrunedResult {
+    /// The tool call it answered.
+    pub id: String,
+    /// How long it was (characters).
+    pub chars: usize,
+    /// Where the whole of it is saved; none for a `read` (the file is the copy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// What the model gets in place of a result that was left out.
+pub fn pruned_note(r: &PrunedResult) -> String {
+    match &r.file {
+        Some(f) => format!("[This output ({} characters) was left out to make room in the context window. It's saved in {f}: read parts of it with `read` (offset / limit) or search it with `grep` if you need it again.]", r.chars),
+        None => format!("[This output ({} characters) was left out to make room in the context window. Read the file again if you need it.]", r.chars),
+    }
 }
 
 fn is_none(n: &usize) -> bool {
@@ -78,7 +104,7 @@ fn is_zero(u: &Usage) -> bool {
     *u == Usage::default()
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -105,6 +131,29 @@ pub fn summary_message(summary: &str) -> String {
 pub fn interrupted_note(reason: &str) -> String {
     let reason: String = reason.trim().trim_end_matches('.').chars().take(300).collect();
     format!("[The turn before this message ended before you answered: {reason}. Everything up to there happened and still stands: go on from it instead of starting over, unless this message asks for something else.]")
+}
+
+/// A file checkpoint taken in a chat: the project's files as they were before event `at` (an
+/// index into [`Session::events`]) — before the change that made the agent take it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Mark {
+    pub at: usize,
+    pub commit: String,
+    /// What it was taken before ("before editing src/main.rs").
+    pub label: String,
+    pub ms: u64,
+}
+
+fn marks_file(session: &Path) -> PathBuf {
+    session.with_extension("checkpoints.json")
+}
+
+/// The checkpoints of the session saved at `session` (see [`Session::marks`]).
+pub async fn marks_at(session: &Path) -> Vec<Mark> {
+    match tokio::fs::read_to_string(marks_file(session)).await {
+        Ok(t) => serde_json::from_str(&t).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// About how many tokens the next request takes, as far as the log knows (see
@@ -262,6 +311,25 @@ impl Session {
         Ok(file)
     }
 
+    /// The file checkpoints taken in this chat (see [`crate::checkpoint`]), oldest first: kept in
+    /// `<id>.checkpoints.json` next to the session, so the log's format stays as it is.
+    pub async fn marks(&self) -> Vec<Mark> {
+        marks_at(&self.path).await
+    }
+
+    /// Note a checkpoint taken now (before event `at` is written).
+    pub async fn add_mark(&self, mark: Mark) -> Result<()> {
+        let mut marks = self.marks().await;
+        // (the same files saved again later in the same turn add nothing)
+        if marks.last().is_some_and(|m| m.commit == mark.commit) {
+            return Ok(());
+        }
+        marks.push(mark);
+        let json = serde_json::to_string(&marks).map_err(|e| Error::Session(e.to_string()))?;
+        tokio::fs::write(marks_file(&self.path), json).await?;
+        Ok(())
+    }
+
     pub fn events(&self) -> &[SessionEvent] {
         &self.events
     }
@@ -285,6 +353,11 @@ impl Session {
     /// a turn that didn't finish says so first ([`interrupted_note`]).
     pub fn messages(&self) -> Vec<Message> {
         let mut p = Projection::default();
+        for e in &self.events {
+            if let SessionEvent::Pruned { results } = e {
+                p.pruned.extend(results.iter().map(|r| (r.id.as_str(), pruned_note(r))));
+            }
+        }
         for (i, e) in self.events.iter().enumerate() {
             match e {
                 SessionEvent::Compacted { summary, kept, tail, .. } => {
@@ -505,6 +578,8 @@ struct Projection<'a> {
     cut: Option<&'a str>,
     /// The user's messages since the model's last step: a compaction may keep them.
     unanswered: Vec<Vec<Block>>,
+    /// Tool results left out ([`SessionEvent::Pruned`]), by call, with the note that stands for each.
+    pruned: std::collections::HashMap<&'a str, String>,
 }
 
 impl<'a> Projection<'a> {
@@ -526,7 +601,18 @@ impl<'a> Projection<'a> {
                 self.unanswered.clear();
                 push(&mut self.out, Role::Assistant, content.clone());
             }
-            SessionEvent::ToolResults { results, .. } => push(&mut self.out, Role::User, results.clone()),
+            SessionEvent::ToolResults { results, .. } => {
+                let results = results
+                    .iter()
+                    .map(|b| match b {
+                        Block::ToolResult { tool_use_id, is_error, .. } if self.pruned.contains_key(tool_use_id.as_str()) => {
+                            Block::ToolResult { tool_use_id: tool_use_id.clone(), content: self.pruned[tool_use_id.as_str()].clone(), is_error: *is_error }
+                        }
+                        b => b.clone(),
+                    })
+                    .collect();
+                push(&mut self.out, Role::User, results)
+            }
             SessionEvent::Interrupted { reason } => self.cut = Some(reason),
             _ => {}
         }

@@ -2,7 +2,7 @@
 // "Manage AI connections" dialog (add / edit / delete profiles, API key, test).
 import clsx from "clsx";
 import { Bot, Check, ChevronDown, Copy, Eye, EyeOff, KeyRound, Plus, Settings2, Trash2, X } from "lucide-react";
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { toast } from "sonner";
 import { Badge, Button, Checkbox, Dialog, Field, IconButton, Input, Select, Spinner } from "../../components/ui";
 import { api, errMsg } from "../../lib/api";
@@ -233,6 +233,9 @@ const DEFAULT_MAX_STEPS = 200;
  *  picked in the chat; here it only gets a default once the provider's list is known. */
 function AgentFields({ value, onChange, providerId, apiKey }: { value: AgentSettings; onChange: (a: AgentSettings) => void; providerId: string; apiKey: string }) {
   const list = useModelList(value, providerId, apiKey);
+  // other DevCat Agent connections, to fall back to
+  const providers = useProviders((s) => s.providers);
+  const others = useMemo(() => providers.filter((p) => p.kind === "agent" && p.id !== providerId), [providers, providerId]);
   const preset = AGENT_PRESETS.find((p) => p.settings.baseUrl === value.baseUrl && p.settings.protocol === value.protocol);
   // Default model: keep the current one if the provider has it, else the preset's, else the newest.
   useEffect(() => {
@@ -248,7 +251,7 @@ function AgentFields({ value, onChange, providerId, apiKey }: { value: AgentSett
         <Field label="Provider" hint={preset?.keyHint ?? "Any OpenAI- or Anthropic-compatible API."}>
           <Select value={preset?.label ?? ""} onChange={(e) => {
             const p = AGENT_PRESETS.find((x) => x.label === e.target.value);
-            if (p) onChange({ ...p.settings, maxSteps: value.maxSteps, delegate: value.delegate });
+            if (p) onChange({ ...p.settings, maxSteps: value.maxSteps, delegate: value.delegate, learn: value.learn, fallback: value.fallback });
           }}>
             {!preset && <option value="">Custom</option>}
             {AGENT_PRESETS.map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
@@ -284,6 +287,15 @@ function AgentFields({ value, onChange, providerId, apiKey }: { value: AgentSett
       </Field>
       <Field label="Coding agents" hint="Claude Code, Codex and other agents connected to DevCat (and DevCat Agent chats) can hand this model a task with agent_delegate: it works in their folder and may read and edit files there, but runs no commands. Useful for a cheaper or local model.">
         <Checkbox label="Coding agents may hand it work" checked={!!value.delegate} onChange={(v) => onChange({ ...value, delegate: v })} />
+      </Field>
+      <Field label="Learning" hint="Every few turns (and after a long one), the agent looks back over the chat in the background and saves to memory what's worth keeping: your preferences, corrections, facts about the project. Each look back is one more request to this model. Not in ghost chats or scheduled jobs.">
+        <Checkbox label="Learn from chats" checked={!!value.learn} onChange={(v) => onChange({ ...value, learn: v })} />
+      </Field>
+      <Field label="Fallback" hint="When this connection's provider is down, out of quota or refuses the key, a step is taken with this connection's model instead; the next message tries this one again.">
+        <Select value={value.fallback ?? ""} onChange={(e) => onChange({ ...value, fallback: e.target.value || null })}>
+          <option value="">None</option>
+          {others.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </Select>
       </Field>
     </>
   );

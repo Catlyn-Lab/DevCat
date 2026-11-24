@@ -228,6 +228,9 @@ export const api = {
   agentRename: (sessionId: string, title: string) => invoke<void>("agent_rename", { sessionId, title }),
   /** A new chat with the conversation before the user's message `text` (the `nth` with that text). */
   agentFork: (sessionId: string, text: string, nth: number) => invoke<string>("agent_fork", { sessionId, text, nth }),
+  /** Put the chat folder's files back to before the user's message (or, `preview`, say what that would change). */
+  agentRestore: (sessionId: string, text: string, nth: number, preview: boolean) =>
+    invoke<{ label: string; ms: number; files: [string, "added" | "modified" | "deleted"][] }>("agent_restore", { sessionId, text, nth, preview }),
   /** Allow the hooks of a chat's folder as they are now (they run commands on this computer). */
   /** `digest`: the review the user saw; nothing is allowed if the hooks changed since. */
   agentTrustHooks: (sessionId: string, digest: string) => invoke<void>("agent_trust_hooks", { sessionId, digest }),

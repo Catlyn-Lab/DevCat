@@ -455,7 +455,9 @@ async fn ask_approval(l: &Link, session: &str, name: &str, req: &Value, url: Opt
     if let Some(u) = url {
         buttons.push(vec![Button::Url { label: "Open in DevCat".into(), url: u.into() }]);
     }
-    let _ = t.send(&l.chat_id, &Outgoing { text: format!("🔐 {name}: allow {tool}?\n{summary}"), buttons }).await;
+    // a command a person must always allow (danger.rs): said plainly, and it asks every time
+    let warning = req["warning"].as_str().map(|w| format!("\n\n⚠️ {w}")).unwrap_or_default();
+    let _ = t.send(&l.chat_id, &Outgoing { text: format!("🔐 {name}: allow {tool}?\n{summary}{warning}"), buttons }).await;
 }
 
 async fn ask_question(l: &Link, session: &str, name: &str, q: &Value) {

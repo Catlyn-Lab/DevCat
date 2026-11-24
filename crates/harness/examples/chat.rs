@@ -89,6 +89,7 @@ async fn main() {
             AgentEvent::HelperStep { .. } => {}
             AgentEvent::Hook { event, message } => eprintln!("[{event} hook] {message}"),
             AgentEvent::UserMessage { text, .. } => println!("\n> {text}"),
+            AgentEvent::Checkpoint { label, .. } => eprintln!("[files saved {label}]"),
         })
         .await;
     println!("\n== {end:?}; total {:?}", session.usage());

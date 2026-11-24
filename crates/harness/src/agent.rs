@@ -49,6 +49,13 @@ const MAX_SQUEEZED: u32 = 3;
 /// it just did.
 const WORTH_COMPACTING: f64 = 0.1;
 
+/// Tool results longer than this many characters may be left out to make room before the
+/// conversation is summarized (see [`Agent::prune`]).
+const PRUNE_ABOVE: usize = 2_000;
+
+/// The newest tool results that are never left out: what the model is working with.
+const PRUNE_KEEP: usize = 8;
+
 /// After a summary that failed, the next automatic one waits this many steps.
 const COMPACT_AGAIN_AFTER: u32 = 5;
 
@@ -89,6 +96,8 @@ const EMPTY_REPLY: &str = "Your last message was empty. If the task is done, say
 
 const CUT_OFF: &str = "Your message was cut off at the output limit. Go on exactly where it stopped, without repeating what you already wrote.";
 
+const REPEATING: &str = "Your last message got stuck repeating the same text over and over until it hit the output limit. Don't continue it. Say in a sentence or two what you were doing, then go on with the next step or answer.";
+
 const CUT_OFF_CALL: &str = "Not run: your message hit the output limit before this call's arguments were complete. Make the call smaller: write a long file in parts (`write` the first part, then add the rest with `edit`), and put a long script in a file instead of the command line.";
 
 const EMPTY_SUMMARY: &str = "\n\nYour last reply had no text. Write the summary now, as plain text, without calling a tool.";
@@ -104,8 +113,8 @@ refused until the user starts the plan. When you know enough, answer with the pl
 you'd change and how, and anything the user should decide. Keep it short.";
 
 /// The same call (tool and arguments) this many times in a row runs; the next one is refused, so a
-/// model stuck in a loop hears it instead of spending the turn.
-pub const MAX_SAME_CALL: usize = 3;
+/// model stuck in a loop hears it instead of spending the turn (see [`crate::guard`]).
+pub use crate::guard::MAX_SAME_CALL;
 
 /// Helpers (`subagent` calls of one step) that run at the same time; more wait for a free slot.
 pub const MAX_HELPERS: usize = 4;
@@ -405,6 +414,9 @@ pub enum AgentEvent {
     HelperTool { id: String, name: String, input: Value },
     /// The helper started by `subagent` call `id` finished a step; its tokens count for the chat.
     HelperStep { id: String, usage: Usage },
+    /// The project's files were saved (`commit`, see [`crate::checkpoint`]) before the call that
+    /// event `at` of the log answers: the user can put them back to how they were.
+    Checkpoint { commit: String, at: usize, label: String },
     /// A hook has something to tell the user: its `systemMessage`, that it failed, or (Stop) why
     /// the agent goes on. With `event` [`NOTE`] it's the harness's own: what it told the model in
     /// the user's place (that its answer was empty or cut off).
@@ -492,6 +504,23 @@ pub struct Agent {
     pub sandbox: bool,
     /// Messages sent while a turn runs (the app keeps a clone to put them in).
     pub inbox: Inbox,
+    /// Where the project's files are saved before the agent changes them, so the user can put
+    /// them back (see [`crate::checkpoint`]); none by default (a folder on an SSH host, a ghost
+    /// chat).
+    pub checkpoints: Option<Arc<crate::checkpoint::Checkpoints>>,
+    /// The files were saved this turn already (before its first change).
+    checkpointed: bool,
+    /// The user heard why no checkpoint could be taken (once a chat is enough).
+    told_no_checkpoint: bool,
+    /// Only these tools run (a background review: see [`crate::review`]); the others are still
+    /// declared, so the requests start like the chat's, and refused when called.
+    pub(crate) only: Option<HashSet<String>>,
+    /// Files this chat read or wrote whole, with when they were last changed as it left them: a
+    /// `write` over a file it never read, or that changed since, is refused ([`Agent::stale`]).
+    seen: std::sync::Mutex<HashMap<std::path::PathBuf, Option<std::time::SystemTime>>>,
+    /// The rule files of the project's subfolders the model was given with a result
+    /// ([`Agent::folder_rules`]).
+    rules_given: std::sync::Mutex<HashSet<std::path::PathBuf>>,
     /// Steps per turn before it stops with [`TurnEnd::StepLimit`]; 0 = no limit. [`MAX_STEPS`]
     /// by default.
     pub max_steps: u32,
@@ -509,7 +538,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(model: Arc<dyn Model>, tools: Registry, policy: Policy, approver: Arc<dyn Approver>, system: String) -> Agent {
-        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
+        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), checkpoints: None, checkpointed: false, told_no_checkpoint: false, only: None, seen: Default::default(), rules_given: Default::default(), max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
     }
 
     /// Run the hooks of `event` (see [`Hooks::run`]); what they say to the user is sent on. Stop
@@ -600,6 +629,10 @@ impl Agent {
 {list}
 
 Go on from the step marked [>] and keep the list up to date with `todo_write`."));
+        }
+        // what the summary leaves out is still in the log, and can be looked up there
+        if self.tools.get(crate::tools::chat_search::CHAT_SEARCH).is_some() {
+            summary.push_str("\n\nDetails left out of this summary (exact output, earlier messages) can still be found with `chat_search`: it searches the part of this chat that was summarized, too.");
         }
         if mid_turn {
             summary.push_str(MID_TURN);
@@ -720,6 +753,60 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         now.saturating_sub(base) as f64 >= window as f64 * WORTH_COMPACTING
     }
 
+    /// Make room by leaving out old tool results (long ones, but not the newest [`PRUNE_KEEP`]) before
+    /// summarizing: the model keeps the whole conversation in its own words, and gets a note where
+    /// each result was saying where the whole of it is ([`SessionEvent::Pruned`]). Done only when
+    /// it frees enough to go on for a while (a tenth of the window under the limit); returns
+    /// whether it did. (After Hermes Agent's context compressor, MIT.)
+    async fn prune(&self, session: &mut Session, overhead: usize) -> Result<bool> {
+        let (Some(limit), Some(window)) = (self.limit(), self.context_window) else { return Ok(false) };
+        let events = session.events();
+        let from = events.iter().rposition(|e| matches!(e, SessionEvent::Compacted { .. })).map_or(0, |i| i + 1);
+        let done: HashSet<&str> = events.iter().filter_map(|e| if let SessionEvent::Pruned { results } = e { Some(results.iter().map(|r| r.id.as_str())) } else { None }).flatten().collect();
+        let names: HashMap<&str, &str> = events[from..]
+            .iter()
+            .filter_map(|e| if let SessionEvent::Assistant { content, .. } = e { Some(content.iter().filter_map(|b| if let Block::ToolUse { id, name, .. } = b { Some((id.as_str(), name.as_str())) } else { None })) } else { None })
+            .flatten()
+            .collect();
+        let results: Vec<usize> = (from..events.len()).filter(|&i| matches!(events[i], SessionEvent::ToolResults { .. })).collect();
+        let old = &results[..results.len().saturating_sub(PRUNE_KEEP)];
+        let mut picked: Vec<(String, String, String)> = Vec::new();
+        for &i in old {
+            let SessionEvent::ToolResults { results, .. } = &events[i] else { continue };
+            for b in results {
+                if let Block::ToolResult { tool_use_id, content, .. } = b
+                    && content.len() > PRUNE_ABOVE
+                    && !done.contains(tool_use_id.as_str())
+                {
+                    picked.push((tool_use_id.clone(), names.get(tool_use_id.as_str()).copied().unwrap_or("").to_string(), content.clone()));
+                }
+            }
+        }
+        let freed: usize = picked.iter().map(|(_, _, c)| c.len().saturating_sub(300)).sum::<usize>() / 4;
+        let room = (window as f64 * WORTH_COMPACTING) as u64;
+        if picked.is_empty() || self.context_now(session, overhead).saturating_sub(freed as u64) + room > limit {
+            return Ok(false);
+        }
+        let mut pruned = Vec::new();
+        for (id, name, content) in picked {
+            // a file `read` showed is its own copy; anything else is saved to be read again
+            let file = if name == "read" {
+                None
+            } else {
+                match session.save_output(&id, &content).await {
+                    Ok(f) => Some(f.display().to_string()),
+                    Err(_) => continue,
+                }
+            };
+            pruned.push(crate::session::PrunedResult { id, chars: content.chars().count(), file });
+        }
+        if pruned.is_empty() {
+            return Ok(false);
+        }
+        session.append(SessionEvent::Pruned { results: pruned }).await?;
+        Ok(true)
+    }
+
     /// Tell the model something in the user's place (`text`, as the next message), and the chat
     /// that it was told.
     async fn nudge(&self, session: &mut Session, text: &str, on: &mut (dyn FnMut(AgentEvent) + Send)) -> Result<()> {
@@ -759,6 +846,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             context.extend(o.context);
         }
         session.append(SessionEvent::User { text: user_text.to_string(), images, context, hook: None }).await?;
+        self.checkpointed = false;
         let res = self.run(session, cancel, on).await;
         match &res {
             Err(Error::Cancelled) => session.append(SessionEvent::Interrupted { reason: "Stopped by the user".into() }).await?,
@@ -771,9 +859,8 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
 
     async fn run(&mut self, session: &mut Session, cancel: &Cancel, on: &mut (dyn FnMut(AgentEvent) + Send)) -> Result<TurnEnd> {
         let ctx = ToolCtx { cwd: session.cwd.clone().into(), sandbox: self.sandbox };
-        // the last call and how many times in a row it was made (repeat guard)
-        let mut last: Option<(String, Value)> = None;
-        let mut same = 0;
+        // what stops a model that's stuck (see `guard.rs`)
+        let mut guard = crate::guard::Guard::default();
         let system = self.system_now();
         // a Stop hook already sent the agent back to work this turn
         let mut stop_hook_active = false;
@@ -832,9 +919,11 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             if std::mem::take(&mut answered) && read == 0 {
                 return Ok(TurnEnd::Answered);
             }
-            if steps >= compact_from && self.should_compact(session, overhead) {
+            if steps >= compact_from && self.should_compact(session, overhead) && !self.prune(session, overhead).await? {
                 match self.compact_now(session, None, true, true, cancel, on).await {
-                    Ok(_) => {}
+                    // after a summary the model may need to look at things again
+                    Ok(true) => guard.reset(),
+                    Ok(false) => {}
                     Err(Error::Cancelled) => return Err(Error::Cancelled),
                     // The step may still fit: go on, and try the summary again a few steps later.
                     // If it doesn't fit, the provider says so and it's summarized for that below.
@@ -886,6 +975,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                     };
                     match self.compact_now(session, None, true, keep, cancel, on).await {
                         Ok(true) => {
+                            guard.reset();
                             steps -= 1;
                             continue;
                         }
@@ -925,7 +1015,9 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 // (An answer with no text has nothing to go on from: that's the empty one below.)
                 if reply.truncated && !answer.trim().is_empty() && cut_off < MAX_CUT_OFF {
                     cut_off += 1;
-                    self.nudge(session, CUT_OFF, on).await?;
+                    // an answer that ran to the limit repeating itself isn't one to go on with
+                    let ask = if crate::guard::repeating(&answer) { REPEATING } else { CUT_OFF };
+                    self.nudge(session, ask, on).await?;
                     continue;
                 }
                 // Nothing at all (no text, no call): a hiccup of the provider more often than an
@@ -953,19 +1045,25 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 return Ok(TurnEnd::Answered);
             }
             (cut_off, told_empty) = (0, false);
-            // the repeat guard, decided before anything runs
-            let mut repeated = HashSet::new();
+            // the guard, decided before anything runs: the calls it refuses, with why
+            let mut repeated: HashMap<String, String> = HashMap::new();
             for (id, name, input) in &calls {
-                let key = (name.clone(), input.clone());
-                same = if last.as_ref() == Some(&key) { same + 1 } else { 1 };
-                last = Some(key);
-                if same > MAX_SAME_CALL {
-                    repeated.insert(id.clone());
+                if let Some(why) = guard.check(name, input) {
+                    repeated.insert(id.clone(), why);
                 }
             }
+            // what each call was, to tell the guard its result
+            let asked: HashMap<String, (String, Value)> = calls.iter().map(|(id, name, input)| (id.clone(), (name.clone(), input.clone()))).collect();
+            let mut noted = |id: &str, out: &mut ToolOutput| {
+                if let Some((name, input)) = asked.get(id)
+                    && let Some(note) = guard.record(name, input, &out.content, out.is_error)
+                {
+                    out.content.push_str(&format!("\n\n{note}"));
+                }
+            };
             // Helpers first, all at once: they only look, so they can't get in the way of the
             // other calls. Each result is reported as soon as it's in.
-            let jobs: Vec<(String, Value)> = calls.iter().filter(|(id, name, _)| name == SUBAGENT && self.helper.is_none() && !repeated.contains(id)).map(|(id, _, input)| (id.clone(), input.clone())).collect();
+            let jobs: Vec<(String, Value)> = calls.iter().filter(|(id, name, _)| name == SUBAGENT && self.helper.is_none() && self.only.is_none() && !repeated.contains_key(id)).map(|(id, _, input)| (id.clone(), input.clone())).collect();
             let mut helped = if cancel.is_cancelled() { HashMap::new() } else { self.helpers(session, jobs, cancel, on).await };
             let mut results = Vec::new();
             let mut usage = Usage::default();
@@ -980,13 +1078,14 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             let hooked = self.hooks.has("PostToolUse") || self.hooks.has("PostToolUseFailure");
             let together: Vec<bool> = calls
                 .iter()
-                .map(|(id, name, input)| !hooked && !repeated.contains(id) && input.get(UNPARSED).is_none() && self.tools.get(name).is_some_and(|t| t.concurrent(input, &ctx)))
+                .map(|(id, name, input)| !hooked && !repeated.contains_key(id) && input.get(UNPARSED).is_none() && self.tools.get(name).is_some_and(|t| t.concurrent(input, &ctx)))
                 .collect();
             let mut calls = calls.into_iter().enumerate().peekable();
             while let Some((n, (id, name, input))) = calls.next() {
-                if let Some((out, used, took)) = helped.remove(&id) {
+                if let Some((mut out, used, took)) = helped.remove(&id) {
                     usage += used;
                     took_ms.push(took);
+                    noted(&id, &mut out);
                     results.push(Block::ToolResult { tool_use_id: id, content: out.content, is_error: out.is_error });
                     continue;
                 }
@@ -1018,8 +1117,9 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                         };
                         (id, out, halt, said, started.elapsed().as_millis() as u64)
                     });
-                    for (id, out, halt, said, took) in futures::future::join_all(runs).await {
+                    for (id, mut out, halt, said, took) in futures::future::join_all(runs).await {
                         said.into_iter().for_each(&mut *on);
+                        noted(&id, &mut out);
                         if halt.is_some() && self.halt.is_none() {
                             self.halt = halt;
                         }
@@ -1035,14 +1135,14 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                     ToolOutput::err("Not run: stopped by the user.")
                 } else if self.halt.is_some() {
                     ToolOutput::err("Not run: a hook stopped the agent.")
-                } else if repeated.contains(&id) {
-                    ToolOutput::err(format!(
-                        "Not run: you already made this exact `{name}` call {MAX_SAME_CALL} times in a row. Doing it again won't help: try something different, or tell the user what's in the way."
-                    ))
+                } else if let Some(why) = repeated.remove(&id) {
+                    ToolOutput::err(why)
                 } else if reply.truncated && input.get(UNPARSED).is_some() {
                     ToolOutput::err(CUT_OFF_CALL)
                 } else {
-                    self.call(session, &ctx, &id, &name, input, cancel, on).await?
+                    let mut out = self.call(session, &ctx, &id, &name, input, cancel, on).await?;
+                    noted(&id, &mut out);
+                    out
                 };
                 took_ms.push(started.elapsed().as_millis() as u64);
                 on(AgentEvent::ToolResult { id: id.clone(), content: out.content.clone(), is_error: out.is_error });
@@ -1180,6 +1280,13 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 hooks: self.hooks.clone(),
                 sandbox: self.sandbox,
                 inbox: Inbox::default(),
+                // (a helper changes nothing)
+                checkpoints: None,
+                checkpointed: false,
+                told_no_checkpoint: true,
+                only: None,
+                seen: Default::default(),
+                rules_given: Default::default(),
                 max_steps: HELPER_MAX_STEPS,
                 allowed: self.allowed.clone(),
                 helper: Some(id.to_string()),
@@ -1202,6 +1309,11 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             let answer = if session.messages().last().is_some_and(|m| m.role == Role::Assistant) { answer_of(session.events()) } else { String::new() };
             // when it didn't get to answer: the last thing it said, so its work isn't lost
             let so_far = || Some(answer_of(session.events())).filter(|t| !t.is_empty()).map(|t| format!(" What it had so far:\n\n{t}")).unwrap_or_default();
+            let ended = match &res {
+                Ok(TurnEnd::Answered) => "answered",
+                Ok(TurnEnd::StepLimit) => "ran out of steps",
+                Err(_) => "stopped early",
+            };
             let out = match res {
                 Ok(TurnEnd::Answered) if !answer.is_empty() => ToolOutput::ok(answer),
                 Ok(TurnEnd::Answered) => ToolOutput::err("The helper finished without an answer."),
@@ -1214,6 +1326,16 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 Err(e) => ToolOutput::err(format!("The helper stopped: {e}.{}", so_far())),
             };
             let mut out = out;
+            // how it went, for the agent that asked: so it knows what the answer rests on, and
+            // doesn't read again what the helper read
+            if !cancel.is_cancelled() {
+                let steps = session.events().iter().filter(|e| matches!(e, SessionEvent::Assistant { .. })).count();
+                let how = if ended == "answered" && out.is_error { "stopped early" } else { ended };
+                let u = session.usage();
+                let (_, read) = files_of(&session);
+                let files = if read.is_empty() { String::new() } else { format!(" Files it read: {}.", read.join(", ")) };
+                out.content.push_str(&format!("\n\n[Helper {how}: {steps} steps, {} tokens.{files}]", u.input_tokens + u.output_tokens));
+            }
             // PostToolUse hooks on the call, with the helper's answer
             let event = if out.is_error { "PostToolUseFailure" } else { "PostToolUse" };
             if self.hooks.has(event) {
@@ -1244,6 +1366,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         Ok(match self.prepare(session, ctx, id, name, input, cancel, on).await? {
             Prepared::Done(out) => out,
             Prepared::Run(ready) => {
+                self.checkpoint(session, &ready, on).await;
                 let (out, halt) = self.execute(session, ctx, ready, cancel, on).await;
                 if halt.is_some() {
                     self.halt = halt;
@@ -1258,6 +1381,13 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
     /// runs), or with its result when it won't.
     #[allow(clippy::too_many_arguments)]
     async fn prepare(&mut self, session: &mut Session, ctx: &ToolCtx, id: &str, name: &str, input: Value, cancel: &Cancel, on: &mut (dyn FnMut(AgentEvent) + Send)) -> Result<Prepared> {
+        if let Some(only) = &self.only
+            && !only.contains(name)
+        {
+            let mut names: Vec<&str> = only.iter().map(String::as_str).collect();
+            names.sort();
+            return Ok(Prepared::Done(ToolOutput::err(format!("Not run: only {} run here.", names.join(", ")))));
+        }
         // the MCP tools left out of the requests: found here, declared from the next step on
         if name == TOOL_SEARCH {
             let query = input.get("query").and_then(Value::as_str).unwrap_or("").trim().to_string();
@@ -1326,6 +1456,9 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         // what the user types to allow a call that can't be undone (after a hook's rewrite: the
         // text names what this call does)
         let confirm = tool.confirm(&input);
+        // a command that must always be a person's call (deleting a system folder, `curl | sh`):
+        // it asks whatever the policy, hooks or an earlier "always allow" say (see `danger.rs`)
+        let warning = if name == "shell" && kind == Kind::Exec { input.get("command").and_then(Value::as_str).and_then(crate::danger::floor) } else { None };
         // 1. helpers and plan mode: nothing that changes something runs, not even with a yes
         if self.helper.is_some() && (confirm.is_some() || matches!(kind, Kind::Edit | Kind::EditOutside | Kind::Exec)) {
             return Ok(Prepared::Done(ToolOutput::err("Not run: a helper only looks; it doesn't change files or run commands. If this needs doing, say so in your answer.")));
@@ -1336,10 +1469,10 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         // 2. approval (fail closed); a hook can allow it or make it ask, PermissionRequest hooks
         // can answer for the user, and a helper can't ask. A call with `confirm` always asks the
         // user: no policy, hook or earlier "always allow" answers for them.
-        let mut ask = (self.policy.needs_approval(kind) && !self.allowed.contains(name) && !pre.allow) || pre.ask || confirm.is_some();
+        let mut ask = (self.policy.needs_approval(kind) && !self.allowed.contains(name) && !pre.allow) || pre.ask || confirm.is_some() || warning.is_some();
         if ask {
             let o = self.hook(session, "PermissionRequest", Some(&names), foreign(&input), cancel, on).await;
-            let allow = o.allow && confirm.is_none();
+            let allow = o.allow && confirm.is_none() && warning.is_none();
             if o.block.is_some() || allow {
                 session.append(SessionEvent::Approval { tool_use_id: id.to_string(), tool: name.to_string(), allowed: o.block.is_none(), by: "hook".into() }).await?;
             }
@@ -1352,30 +1485,75 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             if self.helper.is_some() {
                 return Ok(Prepared::Done(ToolOutput::err("Not run: this needs the user's OK, and a helper can't ask. If you need it, say so in your answer.")));
             }
-            let req = ApprovalRequest { tool_use_id: id.to_string(), tool: name.to_string(), kind, summary: summary.clone(), input: input.clone(), confirm: confirm.clone() };
+            let req = ApprovalRequest { tool_use_id: id.to_string(), tool: name.to_string(), kind, summary: summary.clone(), input: input.clone(), confirm: confirm.clone(), warning: warning.map(|w| format!("This command {w}.")) };
             let (decision, by) = tokio::select! {
                 d = self.approver.decide(&req) => d,
                 _ = cancel.cancelled() => return Ok(Prepared::Done(ToolOutput::err("Not run: stopped by the user."))),
             };
             let allowed = decision.allows(confirm.as_deref());
+            let nobody = by == "policy";
             session.append(SessionEvent::Approval { tool_use_id: id.to_string(), tool: name.to_string(), allowed, by }).await?;
             match decision {
                 Decision::Deny { reason } => {
                     let why = reason.filter(|r| !r.trim().is_empty()).map(|r| format!(" Reason: {r}")).unwrap_or_default();
-                    return Ok(Prepared::Done(ToolOutput::err(format!("The user declined this call.{why}"))));
+                    // (nobody to ask, for a command a person must allow: the model should know why)
+                    let floor = warning.filter(|_| nobody).map(|w| format!(" It {w}, so it runs only when a person allows it, and nobody can be asked here.")).unwrap_or_default();
+                    return Ok(Prepared::Done(ToolOutput::err(format!("The user declined this call.{why}{floor}"))));
                 }
                 _ if !allowed => {
                     let want = confirm.unwrap_or_default();
                     return Ok(Prepared::Done(ToolOutput::err(format!("Not run: this can't be undone, so it runs only when the user types \"{want}\" to confirm it in DevCat, and they didn't."))));
                 }
-                Decision::AllowForSession if confirm.is_none() => {
+                // (one with a warning is allowed this once: the next one asks again)
+                Decision::AllowForSession if confirm.is_none() && warning.is_none() => {
                     self.allowed.insert(name.to_string());
                 }
                 _ => {}
             }
         }
         on(AgentEvent::ToolCall { id: id.to_string(), name: name.to_string(), summary, input: input.clone() });
-        Ok(Prepared::Run(Ready { id: id.to_string(), name: name.to_string(), tool, input, context: pre.context }))
+        Ok(Prepared::Run(Ready { id: id.to_string(), name: name.to_string(), tool, input, kind, context: pre.context }))
+    }
+
+    /// Before a call that may change the project's files: save them, once a turn (before its first
+    /// change) and again before each command that deletes or overwrites ([`crate::danger::destructive`]),
+    /// so the user can put them back. It never stops the call: a checkpoint that can't be taken
+    /// (the home folder, too many files) is said once, and the work goes on.
+    async fn checkpoint(&mut self, session: &Session, ready: &Ready, on: &mut (dyn FnMut(AgentEvent) + Send)) {
+        let Some(cp) = self.checkpoints.clone() else { return };
+        if !matches!(ready.kind, Kind::Edit | Kind::Exec) {
+            return;
+        }
+        let command = ready.input.get("command").and_then(Value::as_str).filter(|_| ready.name == "shell");
+        if self.checkpointed && !command.is_some_and(crate::danger::destructive) {
+            return;
+        }
+        let label = match (command, ready.input.get("path").and_then(Value::as_str)) {
+            (Some(c), _) => format!("before `{}`", clip(c.lines().next().unwrap_or(c), 80)),
+            (None, Some(p)) if matches!(ready.name.as_str(), "edit" | "write") => format!("before editing {p}"),
+            _ => format!("before {}", ready.name),
+        };
+        match cp.snapshot(&label).await {
+            Ok(crate::checkpoint::Snapshot::Saved { commit, .. }) => {
+                self.checkpointed = true;
+                let at = session.events().len();
+                let mark = crate::session::Mark { at, commit: commit.clone(), label: label.clone(), ms: crate::session::now_ms() };
+                if session.add_mark(mark).await.is_ok() {
+                    on(AgentEvent::Checkpoint { commit, at, label });
+                }
+            }
+            Ok(crate::checkpoint::Snapshot::Skipped { reason }) => {
+                self.checkpointed = true;
+                if !std::mem::replace(&mut self.told_no_checkpoint, true) {
+                    on(AgentEvent::Hook { event: "Checkpoint".into(), message: format!("The files in this folder aren't saved before the agent changes them, so its changes can't be undone from the chat: {reason}") });
+                }
+            }
+            Err(e) => {
+                if !std::mem::replace(&mut self.told_no_checkpoint, true) {
+                    on(AgentEvent::Hook { event: "Checkpoint".into(), message: format!("The files couldn't be saved before the agent changed them, so this change can't be undone from the chat: {e}") });
+                }
+            }
+        }
     }
 
     /// The second half: run the call (with its time limit), PostToolUse hooks, truncation. It
@@ -1383,13 +1561,20 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
     /// [`Tool::concurrent`](crate::tools::Tool::concurrent)). Returns the result, and why the turn
     /// ends after this step when a hook stopped it.
     async fn execute(&self, session: &Session, ctx: &ToolCtx, ready: Ready, cancel: &Cancel, on: &mut (dyn FnMut(AgentEvent) + Send)) -> (ToolOutput, Option<String>) {
-        let Ready { id, name, tool, input, context } = ready;
+        let Ready { id, name, tool, input, context, .. } = ready;
         let (id, name) = (id.as_str(), name.as_str());
         let names = hooks::tool_names(name);
         let foreign = |input: &Value| {
             let (tool_name, tool_input) = hooks::foreign_tool(name, input, &ctx.cwd);
             json!({ "tool_name": tool_name, "tool_input": tool_input, "tool_use_id": id })
         };
+        // a whole file written over one the model hasn't seen as it is now would lose what's in it
+        if name == "write"
+            && let Some(why) = self.stale(session, ctx, &input)
+        {
+            return (fit(session, id, name, ToolOutput::err(why)).await, None);
+        }
+        let path = input.get("path").and_then(Value::as_str).map(|p| crate::tools::resolve(ctx, p));
         // 3. timeout
         let limit = tool.timeout(&input);
         let after = foreign(&input);
@@ -1425,8 +1610,107 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         for c in context.iter().chain(&post.context) {
             out.content.push_str(&format!("\n\n{}", crate::session::hook_context(c)));
         }
+        if !out.is_error
+            && let Some(path) = &path
+        {
+            if matches!(name, "read" | "write" | "edit") && path.is_file() {
+                let changed = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                self.seen.lock().unwrap_or_else(|e| e.into_inner()).insert(path.clone(), changed);
+            }
+            if matches!(name, "read" | "write" | "edit" | "glob" | "grep") {
+                for rules in self.folder_rules(session, ctx, path) {
+                    out.content.push_str(&format!("\n\n{rules}"));
+                }
+            }
+        }
         (out, halt)
     }
+}
+
+impl Agent {
+    /// Why a `write` of `input` mustn't run, if it mustn't: the file is there and this chat never
+    /// read it (nor wrote it), or it changed since (the user, or a command, changed it). Writing it
+    /// whole would throw away what's in it now. A chat opened again doesn't know when it last
+    /// looked, so there a read in its log is enough.
+    fn stale(&self, session: &Session, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        let path = crate::tools::resolve(ctx, input.get("path").and_then(Value::as_str)?);
+        let now = std::fs::metadata(&path).ok().filter(|m| m.is_file())?.modified().ok();
+        let shown = path.strip_prefix(&ctx.cwd).unwrap_or(&path).display().to_string();
+        match self.seen.lock().unwrap_or_else(|e| e.into_inner()).get(&path) {
+            Some(t) if *t == now => None,
+            Some(_) => Some(format!("Not written: {shown} changed since you last read or wrote it (the user or a command changed it), so writing it whole would undo that. Read it again, then make your change (`edit` changes only what you replace).")),
+            None if touched(session, ctx, &path) => None,
+            None => Some(format!("Not written: {shown} already exists and you haven't read it in this chat, so writing it whole would replace what's in it with what you guessed. Read it first, then use `edit` for a change (or `write` the whole of it if that's what you mean).")),
+        }
+    }
+
+    /// The rule files (`AGENTS.md`, else `CLAUDE.md`) of the project's subfolders on the way to
+    /// `path` that the model hasn't been given yet, each in a `<folder-rules>` block for the tool's
+    /// result. The project's own are in the system prompt; a subfolder's are often the ones that
+    /// matter for its files, and they come with the first look into it, so the system prompt (and
+    /// the provider's cache of it) stays as it is. (After Hermes Agent's subdirectory hints, MIT.)
+    fn folder_rules(&self, session: &Session, ctx: &ToolCtx, path: &Path) -> Vec<String> {
+        let root = &ctx.cwd;
+        let Ok(rel) = path.strip_prefix(root) else { return vec![] };
+        let mut dirs = Vec::new();
+        let mut d = if path.is_dir() { Some(rel) } else { rel.parent() };
+        while let Some(x) = d.filter(|x| !x.as_os_str().is_empty()) {
+            dirs.push(x.to_path_buf());
+            d = x.parent();
+        }
+        dirs.reverse();
+        let mut out = Vec::new();
+        for dir in dirs.into_iter().take(FOLDER_DEPTH) {
+            let Some(file) = ["AGENTS.md", "CLAUDE.md"].iter().map(|n| dir.join(n)).find(|f| root.join(f).is_file()) else { continue };
+            let shown = file.to_string_lossy().replace('\\', "/");
+            let marker = format!("<folder-rules path=\"{shown}\">");
+            {
+                let mut given = self.rules_given.lock().unwrap_or_else(|e| e.into_inner());
+                if given.contains(&file) {
+                    continue;
+                }
+                given.insert(file.clone());
+            }
+            // a chat opened again: given in its log already
+            if session.events().iter().any(|e| matches!(e, SessionEvent::ToolResults { results, .. } if results.iter().any(|b| matches!(b, Block::ToolResult { content, .. } if content.contains(&marker))))) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(root.join(&file)) else { continue };
+            let folder = dir.to_string_lossy().replace('\\', "/");
+            out.push(format!("{marker}\n{}\n</folder-rules>\n(The rules for the files in {folder}/: follow them there.)", clip(text.trim(), FOLDER_RULES_CHARS)));
+            if out.len() >= 3 {
+                break;
+            }
+        }
+        out
+    }
+}
+
+/// Subfolders deep that rule files are looked for ([`Agent::folder_rules`]), and how much of one
+/// is given.
+const FOLDER_DEPTH: usize = 8;
+const FOLDER_RULES_CHARS: usize = 20_000;
+
+/// Whether the log has a `read`, `write` or `edit` of `path` that worked.
+fn touched(session: &Session, ctx: &ToolCtx, path: &Path) -> bool {
+    let mut ids = HashSet::new();
+    for e in session.events() {
+        match e {
+            SessionEvent::Assistant { content, .. } => {
+                for b in content {
+                    if let Block::ToolUse { id, name, input } = b
+                        && matches!(name.as_str(), "read" | "write" | "edit")
+                        && input.get("path").and_then(Value::as_str).is_some_and(|p| crate::tools::resolve(ctx, p) == path)
+                    {
+                        ids.insert(id.clone());
+                    }
+                }
+            }
+            SessionEvent::ToolResults { results, .. } if results.iter().any(|b| matches!(b, Block::ToolResult { tool_use_id, is_error: false, .. } if ids.contains(tool_use_id))) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A call through the first half of the pipeline ([`Agent::prepare`]).
@@ -1442,6 +1726,7 @@ struct Ready {
     name: String,
     tool: Arc<dyn crate::tools::Tool>,
     input: Value,
+    kind: Kind,
     /// What PreToolUse hooks added for the model; it goes after the result.
     context: Vec<String>,
 }

@@ -482,7 +482,7 @@ export interface HermesSettings { model: string; provider: string; baseUrl: stri
 /** A model an agent connection offers; `price` is its list price in US dollars per million tokens. */
 export interface AgentModel { id: string; context: number | null; price?: { input: number; output: number; cacheRead: number | null } | null }
 
-export interface AgentSettings { protocol: "openai-chat" | "openai-responses" | "anthropic"; baseUrl: string; model: string; /** Steps per turn before it pauses; 0 = no limit, absent = 200. */ maxSteps?: number | null; /** Coding agents may hand it work (`agent_delegate`). */ delegate?: boolean }
+export interface AgentSettings { protocol: "openai-chat" | "openai-responses" | "anthropic"; baseUrl: string; model: string; /** Steps per turn before it pauses; 0 = no limit, absent = 200. */ maxSteps?: number | null; /** Coding agents may hand it work (`agent_delegate`). */ delegate?: boolean; /** Looks back over chats and saves what's worth keeping to memory. */ learn?: boolean; /** Another DevCat Agent connection's id, used while this one's provider fails. */ fallback?: string | null }
 export interface AiEnvVar { key: string; value: string }
 /** Saved AI connection: the coding-agent CLI the AI workspace terminal runs. */
 export interface AiProvider {
@@ -659,7 +659,7 @@ export interface AgentTrace { events: AgentTraceEvent[]; helpers: Record<string,
 export interface AgentChatInfo { sessionId: string; cwd: string; title: string; providerId: string; providerName: string; origin: string; busy: boolean; waiting: string | null; since: number }
 export interface AgentQuestion { toolUseId: string; question: string; options: string[] }
 /** `confirm`: the call can't be undone (dropping a database): the user types this to allow it. */
-export interface AgentApprovalRequest { toolUseId: string; tool: string; kind: "read" | "edit" | "edit-outside" | "exec" | "fetch" | "query"; summary: string; input: Record<string, unknown>; confirm?: string }
+export interface AgentApprovalRequest { toolUseId: string; tool: string; kind: "read" | "edit" | "edit-outside" | "exec" | "fetch" | "query"; summary: string; input: Record<string, unknown>; confirm?: string; warning?: string }
 /** Payload of `agent-event`. */
 export type AgentLiveEvent =
   | { type: "turnStart"; text: string; attachments?: string[] }
@@ -685,6 +685,10 @@ export type AgentLiveEvent =
   /** A hook's message for the user: its `systemMessage`, a failure, or why a Stop hook sent the agent on.
    *  With `event` "DevCat": what DevCat itself told the agent (an empty or cut-off answer). */
   | { type: "hook"; event: string; message: string }
+  /** The project's files were saved (`commit`) before the change event `at` of the log answers. */
+  | { type: "checkpoint"; commit: string; at: number; label: string }
+  /** The agent looked back over the chat (in the background) and saved these memory entries. */
+  | { type: "reviewed"; saved: string[]; usage: AgentUsage }
   /** A message sent while the agent works: shown at once, read before its next step. */
   | { type: "queued"; text: string; attachments?: string[] }
   /** A queued message is now in the conversation, or (`blocked`) a hook refused it. */

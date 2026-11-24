@@ -2,7 +2,7 @@
 // items a chat draws, and how those items read (step rows, folded runs of steps). Shared by the
 // desktop chat (./AgentChat.tsx) and the phone / browser version (mobile/src/screens/agentchat.tsx),
 // so nothing here may import Tauri.
-import { AppWindow, Bot, Boxes, Database, DatabaseBackup, DatabaseZap, FileDown, FilePen, FilePlus, FileText, FolderSearch, GitBranch, Globe, ListTodo, MessageCircleQuestion, NotebookPen, Plug, ScrollText, Search, SquareTerminal, StickyNote, Wrench } from "lucide-react";
+import { AppWindow, Bot, Boxes, Database, DatabaseBackup, DatabaseZap, FileDown, FilePen, FilePlus, FileText, FolderSearch, GitBranch, Globe, ListTodo, MessageCircleQuestion, NotebookPen, Plug, ScrollText, Search, SquareTerminal, StickyNote, Wrench, History, BookOpen } from "lucide-react";
 import type { AgentApprovalRequest, AgentBlock, AgentContext, AgentLiveEvent, AgentModel, AgentPolicy, AgentQuestion, AgentSessionEvent, AgentUsage } from "../../lib/types";
 
 export type ToolStatus = "pending" | "approval" | "question" | "running" | "done" | "error" | "denied";
@@ -35,7 +35,13 @@ export const SUBAGENT = "subagent";
 export const HARNESS = "DevCat";
 
 /** Who a hook note is from: "Stop hook", or "DevCat told the agent". */
-export const hookLabel = (event: string) => (event === HARNESS ? "DevCat told the agent" : `${event} hook`);
+export const hookLabel = (event: string) => (event === HARNESS ? "DevCat told the agent" : event === CHECKPOINT ? "Undo" : event === LEARNED ? "Learned" : `${event} hook`);
+
+/** The `hook` event of what the agent saved to memory looking back over the chat. */
+export const LEARNED = "Learned";
+
+/** The `hook` event of what DevCat says about saving the files before the agent changes them. */
+export const CHECKPOINT = "Checkpoint";
 
 /** Why a step is tried again, in a few words (`reason` is the harness's error text). */
 export function retryLabel(reason: string) {
@@ -296,6 +302,12 @@ export function apply(c: ChatView, e: AgentLiveEvent): Partial<ChatView> {
         status: t.status === "approval" || declined(e.content) ? "denied" : e.is_error ? "error" : "done",
       }));
       return { items };
+    // the files were saved before a change: the user can put them back from their message
+    case "checkpoint":
+      return {};
+    case "reviewed":
+      items.push({ kind: "hook", key: key(), event: LEARNED, text: `Looking back over this chat, the agent saved to memory: ${e.saved.join(", ")}.` });
+      return { items };
     case "turnEnd": {
       // what it didn't read goes back to the chat box
       const draft = e.unsent?.length ? e.unsent.map((t) => splitAttachments(t).text).join("\n\n") : null;
@@ -359,6 +371,8 @@ export function describe(name: string, input: Record<string, unknown> | null, st
     case "edit": { const c = editChanges(i); return { icon: FilePen, verb: done ? "Edited" : "Editing", target: rel(str(i.path), cwd), plus: c.reduce((n, e) => n + lines(e.after), 0), minus: c.reduce((n, e) => n + lines(e.before), 0) }; }
     case "glob": return { icon: FolderSearch, verb: done ? "Found files" : "Finding files", target: str(i.pattern) };
     case "grep": return { icon: Search, verb: done ? "Searched" : "Searching", target: str(i.pattern) };
+    case "skill_save": return { icon: BookOpen, verb: done ? "Saved the skill" : "Saving the skill", target: str(i.name) };
+    case "chat_search": return { icon: History, verb: done ? "Searched earlier chats" : "Searching earlier chats", target: str(i.query) || (i.session ? "reading one" : "listing them") };
     case "tool_search": return { icon: Search, verb: done ? "Looked for tools" : "Looking for tools", target: str(i.query) };
     case "shell": return { icon: SquareTerminal, verb: done ? "Ran" : "Running", target: str(i.command) };
     case "git": return { icon: GitBranch, verb: done ? "Ran" : "Running", target: `git ${gitArgs(i).map((a) => (/^$|\s/.test(a) ? `"${a}"` : a)).join(" ")}` };

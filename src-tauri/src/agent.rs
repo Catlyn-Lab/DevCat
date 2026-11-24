@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::oneshot;
 
 static DIR: OnceCell<PathBuf> = OnceCell::new();
@@ -147,6 +147,12 @@ fn dir() -> AppResult<&'static PathBuf> {
     DIR.get().ok_or_else(|| AppError::msg("DevCat Agent is not initialised"))
 }
 
+/// Where the project files saved before the agent changes them are kept (see
+/// `devcat_harness::checkpoint`): one store for every folder, next to the chats.
+fn checkpoints_dir() -> AppResult<PathBuf> {
+    Ok(dir()?.parent().map(|d| d.join("agent-checkpoints")).unwrap_or_else(|| dir().map(|d| d.join("checkpoints")).unwrap_or_default()))
+}
+
 /// Where chats are saved; other features (ticket fixing) put their sessions here so the AI
 /// workspace can open them.
 pub fn sessions_dir() -> AppResult<&'static PathBuf> {
@@ -188,6 +194,16 @@ struct Run {
     remote: Option<Arc<crate::agent_ssh::Host>>,
     /// It has the `ssh_*` tools for the user's SSH sessions (`agent_tools/ssh.rs`).
     ssh_tools: bool,
+    /// The user put the files back to a checkpoint (`agent_restore`): the model hears it with the
+    /// next message, or it would go on from files that aren't there anymore.
+    restored: Mutex<Option<String>>,
+    /// The model the chat chose (the connection's, or one picked in the chat): the agent's model may
+    /// name its fallback's while that takes the steps.
+    model: Mutex<String>,
+    /// Turns answered since the agent last looked back over the chat to learn from it.
+    since_review: AtomicU32,
+    /// The review running now (a new message stops it: the chat has moved on).
+    review: Mutex<Option<Cancel>>,
 }
 
 /// Rules, skills and MCP servers the agent found for the folder.
@@ -666,6 +682,16 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
     if ghost.is_none() {
         crate::agent_notes::add(&mut tools);
     }
+    // the folder's earlier chats (`chat_search`): where connections are on, since what an agent
+    // read from them (rows, logs) is in those chats too; never in a ghost chat, which keeps nothing
+    // writing down a procedure as a skill: on this computer (skills are its files, an SSH host's
+    // chat doesn't read them), never in a ghost chat
+    if ghost.is_none() && remote.is_none() {
+        tools.add(devcat_harness::tools::SkillSave { home: home.clone() });
+    }
+    if ghost.is_none() && connections {
+        tools.add(devcat_harness::tools::ChatSearch { dir: sessions_dir()?.clone(), cwd: cwd.to_string(), current: Some(id.clone()) });
+    }
     // the rooms the user lets coding agents use (rooms_tools.rs)
     if ghost.is_none() && crate::rooms_tools::allowed_anywhere() {
         for t in crate::rooms_tools::tools("devcat-agent", false) {
@@ -687,12 +713,18 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
             context.notices.push(format!("Can't work on {} yet: {why} The agent tries again with each file or command.", h.label));
         }
     }
-    let mut agent = Agent::new(Arc::new(Llm::new(cfg.clone())), tools, Policy::Ask, approver.clone(), system);
+    let mut agent = Agent::new(model_of(provider_id, cfg.clone()), tools, Policy::Ask, approver.clone(), system);
     agent.hooks = Arc::new(hooks);
     // the OS sandbox guards this computer: commands on an SSH host don't run in it
     agent.sandbox = ghost.is_none() && remote.is_none() && sandbox_saved(&session.id);
+    // the files are saved before the agent changes them, so the user can put them back: on this
+    // computer only (an SSH host's files aren't here), and not in a ghost chat (it keeps nothing)
+    if ghost.is_none() && remote.is_none() {
+        agent.checkpoints = Some(Arc::new(devcat_harness::checkpoint::Checkpoints::new(&checkpoints_dir()?, dir)));
+    }
     let log = Snapshot::of(&agent, &session);
     let inbox = agent.inbox.clone();
+    let chosen = cfg.model.clone();
     let run = Arc::new(Run {
         id,
         cwd: cwd.to_string(),
@@ -715,6 +747,10 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
         effort: Mutex::new(None),
         remote,
         ssh_tools,
+        restored: Mutex::default(),
+        since_review: AtomicU32::new(0),
+        review: Mutex::default(),
+        model: Mutex::new(chosen),
     });
     // MCP servers start in the background: the chat opens right away and gets their tools when
     // they're ready (between turns, never in the middle of one).
@@ -979,7 +1015,59 @@ pub async fn agent_fork(session_id: String, text: String, nth: usize) -> AppResu
     if sandbox_saved(&session_id) {
         let _ = sandbox_save(&new.id, true);
     }
+    // the checkpoints taken before the message it goes back to: the same events, the same places
+    let at = new.events().len();
+    for m in devcat_harness::session::marks_at(&dir()?.join(format!("{session_id}.jsonl"))).await.into_iter().filter(|m| m.at < at) {
+        let _ = new.add_mark(m).await;
+    }
     Ok(new.id)
+}
+
+/// What changed in a file since a checkpoint, for the window.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreInfo {
+    /// What the checkpoint was taken before ("before editing src/main.rs").
+    pub label: String,
+    /// When (ms).
+    pub ms: u64,
+    /// The files that differ from it, and how ("added" since, "modified", "deleted").
+    pub files: Vec<(String, String)>,
+}
+
+/// Put the chat folder's files back to how they were before the user's message `text` (the `nth`
+/// with that text, from 0), or (`preview`) only say what that would change. The checkpoint is the
+/// first one the agent took after that message: the files before its first change. Restoring
+/// saves the files as they are first, so a restore can be undone too. Not while the agent works,
+/// and only in a chat on this computer (an SSH folder and a ghost chat have no checkpoints).
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn agent_restore(session_id: String, text: String, nth: usize, preview: bool) -> AppResult<RestoreInfo> {
+    let run = run_of(&session_id)?;
+    if run.ghost.is_some() || run.remote.is_some() {
+        return Err(AppError::msg("This chat's files aren't saved before the agent changes them (a ghost chat, or a folder on an SSH host)."));
+    }
+    if run.busy.load(Ordering::SeqCst) {
+        return Err(AppError::msg("The agent is working: stop it first, then put the files back."));
+    }
+    let g = run.turn.try_lock().map_err(|_| AppError::msg("The agent is working: stop it first, then put the files back."))?;
+    let (agent, session) = &*g;
+    let at = session.user_message(&text, nth).ok_or_else(|| AppError::msg("That message isn't in the chat's log (it may not have been sent yet)."))?;
+    let mark = session.marks().await.into_iter().find(|m| m.at > at).ok_or_else(|| AppError::msg("The agent hasn't changed any files since this message, so there's nothing to put back."))?;
+    let cp = agent.checkpoints.clone().ok_or_else(|| AppError::msg("This chat's files aren't saved before the agent changes them."))?;
+    let changes = if preview { cp.changed_since(&mark.commit).await } else { cp.restore(&mark.commit).await }.map_err(AppError::msg)?;
+    let status = |s: &devcat_harness::checkpoint::Status| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let files: Vec<(String, String)> = changes.iter().map(|c| (c.path.clone(), status(&c.status))).collect();
+    if !preview && !files.is_empty() {
+        let shown: Vec<&str> = files.iter().take(30).map(|(p, _)| p.as_str()).collect();
+        let more = if files.len() > shown.len() { format!(" and {} more", files.len() - shown.len()) } else { String::new() };
+        let quoted: String = text.trim().chars().take(120).collect();
+        *run.restored.lock() = Some(format!(
+            "[The user put the project's files back to how they were before their message \"{quoted}\": {} file(s) changed ({}{more}). Changes made after that message are undone in the files, though the conversation still shows them. Read a file again before you edit it.]",
+            files.len(),
+            shown.join(", ")
+        ));
+    }
+    Ok(RestoreInfo { label: mark.label, ms: mark.ms, files })
 }
 
 fn valid_id(id: &str) -> bool {
@@ -1169,6 +1257,8 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         (None, None, None) => devcat_harness::commands::expand(&text, std::path::Path::new(&run.cwd), home_dir().as_deref()).map(|(_, ask)| ask),
         _ => None,
     };
+    // the files were put back to a checkpoint since the agent last worked (`agent_restore`)
+    let command: Vec<String> = if compact.is_none() { run.restored.lock().take().into_iter().chain(command).collect() } else { command.into_iter().collect() };
     // While it works, a message from the chat goes in before its next step, as in Claude Code: no
     // need to stop it first (a job's is refused). Decided under `live`, where a turn also ends, so
     // a message is either read by the turn or starts the next one.
@@ -1181,7 +1271,7 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
             if compact.is_some() {
                 return Err(AppError::msg("The agent is working: send /compact when it's done."));
             }
-            run.inbox.push_with(message, images, command.into_iter().collect());
+            run.inbox.push_with(message, images, command);
             run.approver.send_with(&mut live, json!({ "type": "queued", "text": text, "attachments": attachments }));
             drop(live);
             chat_changed(&run.id);
@@ -1192,6 +1282,10 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
     let cancel = Cancel::default();
     *run.cancel.lock() = cancel.clone();
     run.since.store(now_ms(), Ordering::SeqCst);
+    // the chat moves on: a review of it as it was is no use anymore
+    if let Some(r) = run.review.lock().take() {
+        r.cancel();
+    }
     Ok(Some(tokio::spawn(async move {
         let started = std::time::Instant::now();
         let ap = run.approver.clone();
@@ -1202,11 +1296,14 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         let (agent, session) = &mut *g;
         agent.policy = policy;
         // a new model or effort from this message on (the same connection and key)
-        let want = model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| agent.model.name());
+        let chosen = run.model.lock().clone();
+        let want = model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| chosen.clone());
         let effort = effort.unwrap_or(*run.effort.lock());
-        if want != agent.model.name() || effort != *run.effort.lock() {
-            agent.model = Arc::new(Llm::new(devcat_harness::LlmConfig { model: want, effort, ..run.cfg.clone() }));
+        // (also when a fallback took the last steps: each message tries the chosen model again)
+        if want != chosen || effort != *run.effort.lock() || agent.model.name() != want {
+            agent.model = model_of(&run.provider_id, devcat_harness::LlmConfig { model: want.clone(), effort, ..run.cfg.clone() });
             *run.effort.lock() = effort;
+            *run.model.lock() = want;
         }
         agent.context_window = context_window.filter(|&w| w > 0);
         agent.max_steps = crate::ai::agent_max_steps(&run.provider_id);
@@ -1219,7 +1316,7 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         let mut on = |e: AgentEvent| ap.send(serde_json::to_value(&e).unwrap_or(Value::Null));
         let mut res = match compact {
             Some(focus) => agent.compact(session, Some(&focus), &cancel, &mut on).await.map(|_| devcat_harness::TurnEnd::Answered),
-            None => agent.turn_with(session, &message, images, command.into_iter().collect(), &cancel, &mut on).await,
+            None => agent.turn_with(session, &message, images, command, &cancel, &mut on).await,
         };
         let (end, error) = loop {
             let (end, error) = match &res {
@@ -1248,7 +1345,17 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
                     None
                 }
             };
-            let Some(((first, first_images, first_context), rest)) = next else { break (end, error) };
+            let Some(((first, first_images, first_context), rest)) = next else {
+                // time to look back over the chat (see `review_due`): set up now, run without the chat
+                if res.as_ref().is_ok_and(|e| *e == devcat_harness::TurnEnd::Answered) && review_due(&run, session) {
+                    match agent.reviewer(session).await {
+                        Ok(Some(r)) => start_review(&run, r),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("couldn't start a review of chat {}: {e}", run.id),
+                    }
+                }
+                break (end, error);
+            };
             // the others are read at its first step
             for (t, i, c) in rest {
                 agent.inbox.push_with(t, i, c);
@@ -1270,6 +1377,56 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         chat_changed(&run.id);
         (end, error)
     })))
+}
+
+/// The model a chat of `provider_id` takes its steps with: `cfg`'s, with the connection's fallback
+/// (`AgentSettings::fallback`) for when its provider fails.
+fn model_of(provider_id: &str, cfg: devcat_harness::LlmConfig) -> Arc<dyn devcat_harness::Model> {
+    let primary: Arc<dyn devcat_harness::Model> = Arc::new(Llm::new(cfg));
+    match crate::ai::agent_fallback(provider_id) {
+        Some((_, backup)) => Arc::new(devcat_harness::fallback::Fallback::new(primary, Arc::new(Llm::new(backup)))),
+        None => primary,
+    }
+}
+
+/// Turns between two looks back over a chat (see [`review_due`]).
+const REVIEW_EVERY: u32 = 5;
+
+/// Tool calls in one turn that make it worth a look back right away: a long piece of work.
+const REVIEW_AFTER_CALLS: usize = 15;
+
+/// Whether to look back over the chat now (`devcat_harness::review`): its connection learns
+/// (`AgentSettings::learn`), it's a chat someone is in (not a ghost chat or a scheduled job's), and
+/// [`REVIEW_EVERY`] turns have passed or this one was long. Counts the turn.
+fn review_due(run: &Run, session: &Session) -> bool {
+    if run.ghost.is_some() || run.owner == SCHEDULE || !crate::ai::agent_learns(&run.provider_id) {
+        return false;
+    }
+    let turns = run.since_review.fetch_add(1, Ordering::SeqCst) + 1;
+    let from = session.events().iter().rposition(|e| matches!(e, SessionEvent::User { hook: None, .. })).unwrap_or(0);
+    let calls: usize = session.events()[from..].iter().map(|e| match e {
+        SessionEvent::Assistant { content, .. } => content.iter().filter(|b| matches!(b, Block::ToolUse { .. })).count(),
+        _ => 0,
+    }).sum();
+    let due = turns >= REVIEW_EVERY || calls >= REVIEW_AFTER_CALLS;
+    if due {
+        run.since_review.store(0, Ordering::SeqCst);
+    }
+    due
+}
+
+/// Run a review in the background; what it saved is shown in the chat.
+fn start_review(run: &Arc<Run>, r: devcat_harness::review::Reviewer) {
+    let cancel = Cancel::default();
+    *run.review.lock() = Some(cancel.clone());
+    let id = run.id.clone();
+    tokio::spawn(async move {
+        match r.run(&cancel).await {
+            Ok(done) if !done.saved.is_empty() => emit(&id, json!({ "type": "reviewed", "saved": done.saved, "usage": done.usage })),
+            Ok(_) | Err(devcat_harness::Error::Cancelled) => {}
+            Err(e) => eprintln!("the review of chat {id} stopped: {e}"),
+        }
+    });
 }
 
 /// End a turn whose task panicked (`why`: the panic's message): the chat gets a `turnEnd` with

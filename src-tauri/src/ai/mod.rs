@@ -172,6 +172,15 @@ pub struct AgentSettings {
     /// work with `agent_delegate`. Off unless the user turns it on for this connection.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delegate: bool,
+    /// After some turns, the agent looks back over the chat and saves to memory what's worth
+    /// keeping (`devcat_harness::review`). It costs a request each time, so it's off unless the
+    /// user turns it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub learn: bool,
+    /// Another DevCat Agent connection (its id) to take a step when this one's provider is down,
+    /// out of quota or refuses the key (`devcat_harness::llm::Fallback`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
 }
 
 /// The model and provider of a Hermes Agent connection: `hermes chat --model=… --provider=…`.
@@ -305,6 +314,18 @@ pub fn agent_config(provider_id: &str) -> AppResult<(AiProvider, devcat_harness:
 /// DevCat Agent connections the user lets coding agents hand work to (`AgentSettings::delegate`).
 pub fn delegates() -> Vec<AiProvider> {
     store().and_then(|st| st.list()).unwrap_or_default().into_iter().filter(|p| p.kind == AiKind::Agent && p.agent.as_ref().is_some_and(|a| a.delegate)).collect()
+}
+
+/// Whether a DevCat Agent connection looks back over its chats to learn (`AgentSettings::learn`).
+pub fn agent_learns(provider_id: &str) -> bool {
+    store().and_then(|st| st.get(provider_id)).ok().and_then(|p| p.agent).is_some_and(|a| a.learn)
+}
+
+/// The model API a DevCat Agent connection falls back to (`AgentSettings::fallback`): another
+/// DevCat Agent connection, never itself.
+pub fn agent_fallback(provider_id: &str) -> Option<(AiProvider, devcat_harness::LlmConfig)> {
+    let id = store().and_then(|st| st.get(provider_id)).ok()?.agent?.fallback.filter(|f| f != provider_id)?;
+    agent_config(&id).ok()
 }
 
 /// Steps per turn for a DevCat Agent connection (its setting, read fresh so a change applies to

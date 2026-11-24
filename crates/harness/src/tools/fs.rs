@@ -152,7 +152,7 @@ impl Tool for Write {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write".into(),
-            description: "Create a file, or replace a file's whole content. Creates missing folders. Prefer `edit` for changing part of an existing file.".into(),
+            description: "Create a file, or replace a file's whole content. Creates missing folders. Prefer `edit` for changing part of an existing file. To write over a file that exists, `read` it first in this chat: a write over a file you haven't read, or that changed since you did, is refused.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -282,7 +282,7 @@ pub fn edited(text: &str, changes: &[super::edit::Change], input: &Value, shown:
     let n = applied.replacements;
     let mut done = format!(" ({n} replacement{}).", if n == 1 { "" } else { "s" });
     if applied.fuzzy > 0 {
-        done.push_str(" Some of the text matched only after ignoring trailing whitespace and the difference between typographic and plain quotes, dashes or spaces; the lines you replaced now have exactly your `new_string`.");
+        done.push_str(" Some of the text matched only after ignoring whitespace or indentation, typographic quotes, dashes or spaces, or a level of backslash escaping; the lines you replaced now have exactly your `new_string`, re-indented to fit where the indentation differed and with its escapes read the same way where those differed.");
     }
     Ok((applied.text, done))
 }
@@ -512,7 +512,7 @@ mod tests {
         // a curly quote the model typed straight
         std::fs::write(dir.join("src/q.rs"), "let s = \u{201C}hi\u{201D};\n").unwrap();
         let q = Edit.run(json!({ "path": "src/q.rs", "old_string": "let s = \"hi\";", "new_string": "let s = \"hello\";" }), &ctx).await;
-        assert!(!q.is_error && q.content.contains("ignoring trailing whitespace"), "{}", q.content);
+        assert!(!q.is_error && q.content.contains("ignoring whitespace"), "{}", q.content);
         assert_eq!(std::fs::read_to_string(dir.join("src/q.rs")).unwrap(), "let s = \"hello\";\n");
 
         let w = Write.run(json!({ "path": "docs/new/readme.md", "content": "# Hi\n" }), &ctx).await;
