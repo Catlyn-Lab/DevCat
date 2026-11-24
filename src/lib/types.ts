@@ -685,6 +685,8 @@ export type AgentLiveEvent =
   /** A hook's message for the user: its `systemMessage`, a failure, or why a Stop hook sent the agent on.
    *  With `event` "DevCat": what DevCat itself told the agent (an empty or cut-off answer). */
   | { type: "hook"; event: string; message: string }
+  /** The project's files were saved (`commit`) before the change event `at` of the log answers. */
+  | { type: "checkpoint"; commit: string; at: number; label: string }
   /** A message sent while the agent works: shown at once, read before its next step. */
   | { type: "queued"; text: string; attachments?: string[] }
   /** A queued message is now in the conversation, or (`blocked`) a hook refused it. */

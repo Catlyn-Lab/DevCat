@@ -407,6 +407,9 @@ pub enum AgentEvent {
     HelperTool { id: String, name: String, input: Value },
     /// The helper started by `subagent` call `id` finished a step; its tokens count for the chat.
     HelperStep { id: String, usage: Usage },
+    /// The project's files were saved (`commit`, see [`crate::checkpoint`]) before the call that
+    /// event `at` of the log answers: the user can put them back to how they were.
+    Checkpoint { commit: String, at: usize, label: String },
     /// A hook has something to tell the user: its `systemMessage`, that it failed, or (Stop) why
     /// the agent goes on. With `event` [`NOTE`] it's the harness's own: what it told the model in
     /// the user's place (that its answer was empty or cut off).
@@ -494,6 +497,14 @@ pub struct Agent {
     pub sandbox: bool,
     /// Messages sent while a turn runs (the app keeps a clone to put them in).
     pub inbox: Inbox,
+    /// Where the project's files are saved before the agent changes them, so the user can put
+    /// them back (see [`crate::checkpoint`]); none by default (a folder on an SSH host, a ghost
+    /// chat).
+    pub checkpoints: Option<Arc<crate::checkpoint::Checkpoints>>,
+    /// The files were saved this turn already (before its first change).
+    checkpointed: bool,
+    /// The user heard why no checkpoint could be taken (once a chat is enough).
+    told_no_checkpoint: bool,
     /// Steps per turn before it stops with [`TurnEnd::StepLimit`]; 0 = no limit. [`MAX_STEPS`]
     /// by default.
     pub max_steps: u32,
@@ -511,7 +522,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(model: Arc<dyn Model>, tools: Registry, policy: Policy, approver: Arc<dyn Approver>, system: String) -> Agent {
-        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
+        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), checkpoints: None, checkpointed: false, told_no_checkpoint: false, max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
     }
 
     /// Run the hooks of `event` (see [`Hooks::run`]); what they say to the user is sent on. Stop
@@ -761,6 +772,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             context.extend(o.context);
         }
         session.append(SessionEvent::User { text: user_text.to_string(), images, context, hook: None }).await?;
+        self.checkpointed = false;
         let res = self.run(session, cancel, on).await;
         match &res {
             Err(Error::Cancelled) => session.append(SessionEvent::Interrupted { reason: "Stopped by the user".into() }).await?,
@@ -1194,6 +1206,10 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 hooks: self.hooks.clone(),
                 sandbox: self.sandbox,
                 inbox: Inbox::default(),
+                // (a helper changes nothing)
+                checkpoints: None,
+                checkpointed: false,
+                told_no_checkpoint: true,
                 max_steps: HELPER_MAX_STEPS,
                 allowed: self.allowed.clone(),
                 helper: Some(id.to_string()),
@@ -1258,6 +1274,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         Ok(match self.prepare(session, ctx, id, name, input, cancel, on).await? {
             Prepared::Done(out) => out,
             Prepared::Run(ready) => {
+                self.checkpoint(session, &ready, on).await;
                 let (out, halt) = self.execute(session, ctx, ready, cancel, on).await;
                 if halt.is_some() {
                     self.halt = halt;
@@ -1396,7 +1413,48 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             }
         }
         on(AgentEvent::ToolCall { id: id.to_string(), name: name.to_string(), summary, input: input.clone() });
-        Ok(Prepared::Run(Ready { id: id.to_string(), name: name.to_string(), tool, input, context: pre.context }))
+        Ok(Prepared::Run(Ready { id: id.to_string(), name: name.to_string(), tool, input, kind, context: pre.context }))
+    }
+
+    /// Before a call that may change the project's files: save them, once a turn (before its first
+    /// change) and again before each command that deletes or overwrites ([`crate::danger::destructive`]),
+    /// so the user can put them back. It never stops the call: a checkpoint that can't be taken
+    /// (the home folder, too many files) is said once, and the work goes on.
+    async fn checkpoint(&mut self, session: &Session, ready: &Ready, on: &mut (dyn FnMut(AgentEvent) + Send)) {
+        let Some(cp) = self.checkpoints.clone() else { return };
+        if !matches!(ready.kind, Kind::Edit | Kind::Exec) {
+            return;
+        }
+        let command = ready.input.get("command").and_then(Value::as_str).filter(|_| ready.name == "shell");
+        if self.checkpointed && !command.is_some_and(crate::danger::destructive) {
+            return;
+        }
+        let label = match (command, ready.input.get("path").and_then(Value::as_str)) {
+            (Some(c), _) => format!("before `{}`", clip(c.lines().next().unwrap_or(c), 80)),
+            (None, Some(p)) if matches!(ready.name.as_str(), "edit" | "write") => format!("before editing {p}"),
+            _ => format!("before {}", ready.name),
+        };
+        match cp.snapshot(&label).await {
+            Ok(crate::checkpoint::Snapshot::Saved { commit, .. }) => {
+                self.checkpointed = true;
+                let at = session.events().len();
+                let mark = crate::session::Mark { at, commit: commit.clone(), label: label.clone(), ms: crate::session::now_ms() };
+                if session.add_mark(mark).await.is_ok() {
+                    on(AgentEvent::Checkpoint { commit, at, label });
+                }
+            }
+            Ok(crate::checkpoint::Snapshot::Skipped { reason }) => {
+                self.checkpointed = true;
+                if !std::mem::replace(&mut self.told_no_checkpoint, true) {
+                    on(AgentEvent::Hook { event: "Checkpoint".into(), message: format!("The files in this folder aren't saved before the agent changes them, so its changes can't be undone from the chat: {reason}") });
+                }
+            }
+            Err(e) => {
+                if !std::mem::replace(&mut self.told_no_checkpoint, true) {
+                    on(AgentEvent::Hook { event: "Checkpoint".into(), message: format!("The files couldn't be saved before the agent changed them, so this change can't be undone from the chat: {e}") });
+                }
+            }
+        }
     }
 
     /// The second half: run the call (with its time limit), PostToolUse hooks, truncation. It
@@ -1404,7 +1462,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
     /// [`Tool::concurrent`](crate::tools::Tool::concurrent)). Returns the result, and why the turn
     /// ends after this step when a hook stopped it.
     async fn execute(&self, session: &Session, ctx: &ToolCtx, ready: Ready, cancel: &Cancel, on: &mut (dyn FnMut(AgentEvent) + Send)) -> (ToolOutput, Option<String>) {
-        let Ready { id, name, tool, input, context } = ready;
+        let Ready { id, name, tool, input, context, .. } = ready;
         let (id, name) = (id.as_str(), name.as_str());
         let names = hooks::tool_names(name);
         let foreign = |input: &Value| {
@@ -1463,6 +1521,7 @@ struct Ready {
     name: String,
     tool: Arc<dyn crate::tools::Tool>,
     input: Value,
+    kind: Kind,
     /// What PreToolUse hooks added for the model; it goes after the result.
     context: Vec<String>,
 }

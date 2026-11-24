@@ -35,7 +35,10 @@ export const SUBAGENT = "subagent";
 export const HARNESS = "DevCat";
 
 /** Who a hook note is from: "Stop hook", or "DevCat told the agent". */
-export const hookLabel = (event: string) => (event === HARNESS ? "DevCat told the agent" : `${event} hook`);
+export const hookLabel = (event: string) => (event === HARNESS ? "DevCat told the agent" : event === CHECKPOINT ? "Undo" : `${event} hook`);
+
+/** The `hook` event of what DevCat says about saving the files before the agent changes them. */
+export const CHECKPOINT = "Checkpoint";
 
 /** Why a step is tried again, in a few words (`reason` is the harness's error text). */
 export function retryLabel(reason: string) {
@@ -296,6 +299,9 @@ export function apply(c: ChatView, e: AgentLiveEvent): Partial<ChatView> {
         status: t.status === "approval" || declined(e.content) ? "denied" : e.is_error ? "error" : "done",
       }));
       return { items };
+    // the files were saved before a change: the user can put them back from their message
+    case "checkpoint":
+      return {};
     case "turnEnd": {
       // what it didn't read goes back to the chat box
       const draft = e.unsent?.length ? e.unsent.map((t) => splitAttachments(t).text).join("\n\n") : null;

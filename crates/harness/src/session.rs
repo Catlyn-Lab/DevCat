@@ -78,7 +78,7 @@ fn is_zero(u: &Usage) -> bool {
     *u == Usage::default()
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -105,6 +105,29 @@ pub fn summary_message(summary: &str) -> String {
 pub fn interrupted_note(reason: &str) -> String {
     let reason: String = reason.trim().trim_end_matches('.').chars().take(300).collect();
     format!("[The turn before this message ended before you answered: {reason}. Everything up to there happened and still stands: go on from it instead of starting over, unless this message asks for something else.]")
+}
+
+/// A file checkpoint taken in a chat: the project's files as they were before event `at` (an
+/// index into [`Session::events`]) — before the change that made the agent take it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Mark {
+    pub at: usize,
+    pub commit: String,
+    /// What it was taken before ("before editing src/main.rs").
+    pub label: String,
+    pub ms: u64,
+}
+
+fn marks_file(session: &Path) -> PathBuf {
+    session.with_extension("checkpoints.json")
+}
+
+/// The checkpoints of the session saved at `session` (see [`Session::marks`]).
+pub async fn marks_at(session: &Path) -> Vec<Mark> {
+    match tokio::fs::read_to_string(marks_file(session)).await {
+        Ok(t) => serde_json::from_str(&t).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// About how many tokens the next request takes, as far as the log knows (see
@@ -260,6 +283,25 @@ impl Session {
         let file = dir.join(format!("{}.txt", file_safe(tool_use_id)));
         tokio::fs::write(&file, text).await?;
         Ok(file)
+    }
+
+    /// The file checkpoints taken in this chat (see [`crate::checkpoint`]), oldest first: kept in
+    /// `<id>.checkpoints.json` next to the session, so the log's format stays as it is.
+    pub async fn marks(&self) -> Vec<Mark> {
+        marks_at(&self.path).await
+    }
+
+    /// Note a checkpoint taken now (before event `at` is written).
+    pub async fn add_mark(&self, mark: Mark) -> Result<()> {
+        let mut marks = self.marks().await;
+        // (the same files saved again later in the same turn add nothing)
+        if marks.last().is_some_and(|m| m.commit == mark.commit) {
+            return Ok(());
+        }
+        marks.push(mark);
+        let json = serde_json::to_string(&marks).map_err(|e| Error::Session(e.to_string()))?;
+        tokio::fs::write(marks_file(&self.path), json).await?;
+        Ok(())
     }
 
     pub fn events(&self) -> &[SessionEvent] {

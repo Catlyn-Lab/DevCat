@@ -1856,3 +1856,35 @@ async fn a_command_that_could_wreck_the_computer_always_asks() {
     assert_eq!(ran.lock().unwrap().len(), 3);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The files are saved before the turn's first change, and the checkpoint is noted next to the
+/// session with the event it came before; restoring it puts the files back.
+#[tokio::test]
+async fn the_files_are_saved_before_a_turn_changes_them() {
+    if std::process::Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let (dir, mut session) = project().await;
+    let edit = |id: &str, from: &str, to: &str| tool(id, "edit", json!({ "path": "notes.txt", "old_string": from, "new_string": to }));
+    let model = Scripted::new(vec![
+        vec![tool("r", "read", json!({ "path": "notes.txt" }))],
+        vec![edit("e1", "version = 1", "version = 2")],
+        vec![edit("e2", "version = 2", "version = 3")],
+        vec![text("done")],
+    ]);
+    let mut agent = Agent::new(model, Registry::standard(), Policy::AutoEdit, Arc::new(DenyAll), "s".into());
+    agent.checkpoints = Some(Arc::new(devcat_harness::checkpoint::Checkpoints::new(&dir.join("checkpoints"), &dir.join("proj"))));
+    let mut events = Vec::new();
+    agent.turn(&mut session, "bump it twice", &Cancel::default(), &mut |e| events.push(e)).await.unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join("proj/notes.txt")).unwrap(), "version = 3\n");
+    // one checkpoint for the turn, taken before the first edit (not before the read)
+    let marks = session.marks().await;
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!(marks[0].label, "before editing notes.txt");
+    assert!(matches!(&session.events()[marks[0].at - 1], SessionEvent::Assistant { content, .. } if content.iter().any(|b| matches!(b, Block::ToolUse { id, .. } if id == "e1"))));
+    assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::Checkpoint { .. })).count(), 1);
+    let cp = agent.checkpoints.clone().unwrap();
+    cp.restore(&marks[0].commit).await.unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join("proj/notes.txt")).unwrap(), "version = 1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -147,6 +147,12 @@ fn dir() -> AppResult<&'static PathBuf> {
     DIR.get().ok_or_else(|| AppError::msg("DevCat Agent is not initialised"))
 }
 
+/// Where the project files saved before the agent changes them are kept (see
+/// `devcat_harness::checkpoint`): one store for every folder, next to the chats.
+fn checkpoints_dir() -> AppResult<PathBuf> {
+    Ok(dir()?.parent().map(|d| d.join("agent-checkpoints")).unwrap_or_else(|| dir().map(|d| d.join("checkpoints")).unwrap_or_default()))
+}
+
 /// Where chats are saved; other features (ticket fixing) put their sessions here so the AI
 /// workspace can open them.
 pub fn sessions_dir() -> AppResult<&'static PathBuf> {
@@ -188,6 +194,9 @@ struct Run {
     remote: Option<Arc<crate::agent_ssh::Host>>,
     /// It has the `ssh_*` tools for the user's SSH sessions (`agent_tools/ssh.rs`).
     ssh_tools: bool,
+    /// The user put the files back to a checkpoint (`agent_restore`): the model hears it with the
+    /// next message, or it would go on from files that aren't there anymore.
+    restored: Mutex<Option<String>>,
 }
 
 /// Rules, skills and MCP servers the agent found for the folder.
@@ -691,6 +700,11 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
     agent.hooks = Arc::new(hooks);
     // the OS sandbox guards this computer: commands on an SSH host don't run in it
     agent.sandbox = ghost.is_none() && remote.is_none() && sandbox_saved(&session.id);
+    // the files are saved before the agent changes them, so the user can put them back: on this
+    // computer only (an SSH host's files aren't here), and not in a ghost chat (it keeps nothing)
+    if ghost.is_none() && remote.is_none() {
+        agent.checkpoints = Some(Arc::new(devcat_harness::checkpoint::Checkpoints::new(&checkpoints_dir()?, dir)));
+    }
     let log = Snapshot::of(&agent, &session);
     let inbox = agent.inbox.clone();
     let run = Arc::new(Run {
@@ -715,6 +729,7 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
         effort: Mutex::new(None),
         remote,
         ssh_tools,
+        restored: Mutex::default(),
     });
     // MCP servers start in the background: the chat opens right away and gets their tools when
     // they're ready (between turns, never in the middle of one).
@@ -979,7 +994,59 @@ pub async fn agent_fork(session_id: String, text: String, nth: usize) -> AppResu
     if sandbox_saved(&session_id) {
         let _ = sandbox_save(&new.id, true);
     }
+    // the checkpoints taken before the message it goes back to: the same events, the same places
+    let at = new.events().len();
+    for m in devcat_harness::session::marks_at(&dir()?.join(format!("{session_id}.jsonl"))).await.into_iter().filter(|m| m.at < at) {
+        let _ = new.add_mark(m).await;
+    }
     Ok(new.id)
+}
+
+/// What changed in a file since a checkpoint, for the window.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreInfo {
+    /// What the checkpoint was taken before ("before editing src/main.rs").
+    pub label: String,
+    /// When (ms).
+    pub ms: u64,
+    /// The files that differ from it, and how ("added" since, "modified", "deleted").
+    pub files: Vec<(String, String)>,
+}
+
+/// Put the chat folder's files back to how they were before the user's message `text` (the `nth`
+/// with that text, from 0), or (`preview`) only say what that would change. The checkpoint is the
+/// first one the agent took after that message: the files before its first change. Restoring
+/// saves the files as they are first, so a restore can be undone too. Not while the agent works,
+/// and only in a chat on this computer (an SSH folder and a ghost chat have no checkpoints).
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn agent_restore(session_id: String, text: String, nth: usize, preview: bool) -> AppResult<RestoreInfo> {
+    let run = run_of(&session_id)?;
+    if run.ghost.is_some() || run.remote.is_some() {
+        return Err(AppError::msg("This chat's files aren't saved before the agent changes them (a ghost chat, or a folder on an SSH host)."));
+    }
+    if run.busy.load(Ordering::SeqCst) {
+        return Err(AppError::msg("The agent is working: stop it first, then put the files back."));
+    }
+    let g = run.turn.try_lock().map_err(|_| AppError::msg("The agent is working: stop it first, then put the files back."))?;
+    let (agent, session) = &*g;
+    let at = session.user_message(&text, nth).ok_or_else(|| AppError::msg("That message isn't in the chat's log (it may not have been sent yet)."))?;
+    let mark = session.marks().await.into_iter().find(|m| m.at > at).ok_or_else(|| AppError::msg("The agent hasn't changed any files since this message, so there's nothing to put back."))?;
+    let cp = agent.checkpoints.clone().ok_or_else(|| AppError::msg("This chat's files aren't saved before the agent changes them."))?;
+    let changes = if preview { cp.changed_since(&mark.commit).await } else { cp.restore(&mark.commit).await }.map_err(AppError::msg)?;
+    let status = |s: &devcat_harness::checkpoint::Status| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let files: Vec<(String, String)> = changes.iter().map(|c| (c.path.clone(), status(&c.status))).collect();
+    if !preview && !files.is_empty() {
+        let shown: Vec<&str> = files.iter().take(30).map(|(p, _)| p.as_str()).collect();
+        let more = if files.len() > shown.len() { format!(" and {} more", files.len() - shown.len()) } else { String::new() };
+        let quoted: String = text.trim().chars().take(120).collect();
+        *run.restored.lock() = Some(format!(
+            "[The user put the project's files back to how they were before their message \"{quoted}\": {} file(s) changed ({}{more}). Changes made after that message are undone in the files, though the conversation still shows them. Read a file again before you edit it.]",
+            files.len(),
+            shown.join(", ")
+        ));
+    }
+    Ok(RestoreInfo { label: mark.label, ms: mark.ms, files })
 }
 
 fn valid_id(id: &str) -> bool {
@@ -1169,6 +1236,8 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         (None, None, None) => devcat_harness::commands::expand(&text, std::path::Path::new(&run.cwd), home_dir().as_deref()).map(|(_, ask)| ask),
         _ => None,
     };
+    // the files were put back to a checkpoint since the agent last worked (`agent_restore`)
+    let command: Vec<String> = if compact.is_none() { run.restored.lock().take().into_iter().chain(command).collect() } else { command.into_iter().collect() };
     // While it works, a message from the chat goes in before its next step, as in Claude Code: no
     // need to stop it first (a job's is refused). Decided under `live`, where a turn also ends, so
     // a message is either read by the turn or starts the next one.
@@ -1181,7 +1250,7 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
             if compact.is_some() {
                 return Err(AppError::msg("The agent is working: send /compact when it's done."));
             }
-            run.inbox.push_with(message, images, command.into_iter().collect());
+            run.inbox.push_with(message, images, command);
             run.approver.send_with(&mut live, json!({ "type": "queued", "text": text, "attachments": attachments }));
             drop(live);
             chat_changed(&run.id);
@@ -1219,7 +1288,7 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         let mut on = |e: AgentEvent| ap.send(serde_json::to_value(&e).unwrap_or(Value::Null));
         let mut res = match compact {
             Some(focus) => agent.compact(session, Some(&focus), &cancel, &mut on).await.map(|_| devcat_harness::TurnEnd::Answered),
-            None => agent.turn_with(session, &message, images, command.into_iter().collect(), &cancel, &mut on).await,
+            None => agent.turn_with(session, &message, images, command, &cancel, &mut on).await,
         };
         let (end, error) = loop {
             let (end, error) = match &res {

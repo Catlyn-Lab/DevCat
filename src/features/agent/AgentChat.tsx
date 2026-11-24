@@ -4,7 +4,7 @@
 // carries the permission mode, model and token use.
 import clsx from "clsx";
 import {
-  ArrowUp, Ban, Ghost, BookOpen, ClipboardList, Layers, Database, ListTodo, Circle, CircleCheck, CircleDot, FoldVertical, Bot, Brain, Check, ChevronDown, ChevronRight, Cpu, FilePen, File as FileIcon, MessageCircleQuestion, Paperclip, Pencil, Plug, TriangleAlert, Upload, GitCompare, Container, Shield, ShieldAlert, ShieldCheck, ShieldOff, Server, Square, Webhook, X,
+  ArrowUp, Ban, Ghost, BookOpen, ClipboardList, Layers, Database, ListTodo, Circle, CircleCheck, CircleDot, FoldVertical, Bot, Brain, Check, ChevronDown, ChevronRight, Cpu, FilePen, File as FileIcon, MessageCircleQuestion, Paperclip, Pencil, Plug, RotateCcw, TriangleAlert, Upload, GitCompare, Container, Shield, ShieldAlert, ShieldCheck, ShieldOff, Server, Square, Webhook, X,
 } from "lucide-react";
 import { memo, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Button, Empty, Spinner } from "../../components/ui";
@@ -17,7 +17,7 @@ import { DRAG_PATHS } from "../files/format";
 import { open as pickFiles } from "@tauri-apps/plugin-dialog";
 import { GHOST_SUGGESTIONS, HARNESS, POLICIES, SUBAGENT, SUGGESTIONS, allowAllLabel, focusSuggestions, approvalTitle, basename, chatCost, contextWindow, describe, diffRows, editChanges, editedFiles, fmtDuration, fmtTokens, helperProgress, hookLabel, retryLabel, stillChanged, str, summarize, toBlocks, todoList, type Item, type ToolItem, type ToolStatus } from "./model";
 import { fmtCost } from "../claude/util";
-import { EFFORTS, answer, answerQuestion, attach, clearDraft, closeChat, connectionModels, dismissError, editMessage, loadSandbox, openChat, send, setEffort, setModel, setPolicy, setSandbox, type Effort, stop, trustHooks, unattach, useAgent, useSandbox } from "./store";
+import { EFFORTS, answer, answerQuestion, attach, clearDraft, closeChat, connectionModels, dismissError, editMessage, loadSandbox, restoreFiles, openChat, send, setEffort, setModel, setPolicy, setSandbox, type Effort, stop, trustHooks, unattach, useAgent, useSandbox } from "./store";
 import { useClaude } from "../claude/store";
 import { isRemote } from "../../lib/remotePath";
 import { historyFor, remember } from "./history";
@@ -191,17 +191,27 @@ function UserMessage({ item, tabId }: { item: Extract<Item, { kind: "user" }>; t
     const c = s.chats[tabId];
     return !!c?.sessionId && !c.busy && !c.context?.ghost && !item.queued;
   });
+  // the files are saved before the agent changes them on this computer (not on an SSH host)
+  const canRestore = useAgent((s) => canEdit && !s.chats[tabId]?.context?.host);
   return (
     <div className="group flex flex-col items-end gap-1.5">
       {item.attachments.length > 0 && <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">{item.attachments.map((p) => <AttachmentChip key={p} path={p} />)}</div>}
       {item.text && <div className={clsx("max-w-[85%] rounded-2xl rounded-br-md bg-raised px-3.5 py-2 text-[13px] whitespace-pre-wrap text-fg", item.queued && "opacity-60")}>{item.text}</div>}
       {item.queued && <span className="text-[11px] text-faint">Sent while it works: it reads this after its current step</span>}
+      <div className="flex items-center gap-1">
       {canEdit && (
         <button onClick={() => void editMessage(tabId, item.key)} title="Go back to this message and write it again, in a new chat (this one stays as it is)"
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-faint opacity-0 transition-opacity group-hover:opacity-100 hover:text-fg focus-visible:opacity-100">
           <Pencil className="size-3" />Edit
         </button>
       )}
+      {canRestore && (
+        <button onClick={() => void restoreFiles(tabId, item.key)} title="Put the project's files back to how they were before this message (shows what changes first)"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-faint opacity-0 transition-opacity group-hover:opacity-100 hover:text-fg focus-visible:opacity-100">
+          <RotateCcw className="size-3" />Restore files
+        </button>
+      )}
+      </div>
     </div>
   );
 }

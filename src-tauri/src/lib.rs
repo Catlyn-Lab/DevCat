@@ -503,6 +503,7 @@ pub fn run() {
             agent::agent_sessions,
             agent::agent_rename,
             agent::agent_fork,
+            agent::agent_restore,
             agent::agent_commands,
             agent::agent_trust_hooks,
             agent::agent_trace,
