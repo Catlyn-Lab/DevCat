@@ -1,7 +1,7 @@
 // Small set of shared UI primitives. Keep them dumb and composable.
 import clsx from "clsx";
 import { Loader2, X, type LucideIcon } from "lucide-react";
-import { useEffect, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { useEffect, useState, type ButtonHTMLAttributes, type PointerEvent as ReactPointerEvent, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 
 type Variant = "primary" | "ghost" | "danger" | "default";
 
@@ -136,15 +136,41 @@ export function Dialog({ open, onClose, title, children, footer, width = 560 }:
       dialogStack.splice(dialogStack.indexOf(me), 1);
     };
   }, [open, onClose]);
+  // Dragged by its title bar; it opens centred again each time.
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  useEffect(() => { if (open) setOffset({ x: 0, y: 0 }); }, [open]);
+  const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
+    e.preventDefault();
+    const box = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+    const start = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
+    // Keep at least part of the title bar on screen so it can always be dragged back.
+    const keep = 80;
+    const minX = start.ox + keep - box.right, maxX = start.ox + window.innerWidth - keep - box.left;
+    const minY = start.oy - box.top, maxY = start.oy + window.innerHeight - 40 - box.top;
+    const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+    const move = (ev: PointerEvent) => setOffset({
+      x: clamp(start.ox + ev.clientX - start.x, minX, maxX),
+      y: clamp(start.oy + ev.clientY - start.y, minY, maxY),
+    });
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" style={{ zIndex: 50 + depth }} onMouseDown={onClose}>
       <div
         className="flex max-h-[88vh] flex-col rounded-lg border border-line bg-panel shadow-2xl"
-        style={{ width }}
+        style={{ width, transform: offset.x || offset.y ? `translate(${offset.x}px, ${offset.y}px)` : undefined }}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="flex h-10 items-center justify-between border-b border-line px-4">
+        <div className="flex h-10 cursor-move select-none items-center justify-between border-b border-line px-4" onPointerDown={startDrag}>
           <div className="font-semibold">{title}</div>
           <IconButton title="Close" onClick={onClose}><X className="size-4" /></IconButton>
         </div>
