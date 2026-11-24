@@ -63,6 +63,10 @@ pub struct ApprovalRequest {
     /// What the user must type to allow it (see `Tool::confirm`); a plain allow doesn't.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm: Option<String>,
+    /// Why this call asks whatever the policy (a command that, say, deletes a system folder: see
+    /// [`crate::danger::floor`]). Such a call is allowed once at a time, never for the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

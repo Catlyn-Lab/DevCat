@@ -659,7 +659,7 @@ export interface AgentTrace { events: AgentTraceEvent[]; helpers: Record<string,
 export interface AgentChatInfo { sessionId: string; cwd: string; title: string; providerId: string; providerName: string; origin: string; busy: boolean; waiting: string | null; since: number }
 export interface AgentQuestion { toolUseId: string; question: string; options: string[] }
 /** `confirm`: the call can't be undone (dropping a database): the user types this to allow it. */
-export interface AgentApprovalRequest { toolUseId: string; tool: string; kind: "read" | "edit" | "edit-outside" | "exec" | "fetch" | "query"; summary: string; input: Record<string, unknown>; confirm?: string }
+export interface AgentApprovalRequest { toolUseId: string; tool: string; kind: "read" | "edit" | "edit-outside" | "exec" | "fetch" | "query"; summary: string; input: Record<string, unknown>; confirm?: string; warning?: string }
 /** Payload of `agent-event`. */
 export type AgentLiveEvent =
   | { type: "turnStart"; text: string; attachments?: string[] }

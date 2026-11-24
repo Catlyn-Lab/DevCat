@@ -1340,6 +1340,9 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         // what the user types to allow a call that can't be undone (after a hook's rewrite: the
         // text names what this call does)
         let confirm = tool.confirm(&input);
+        // a command that must always be a person's call (deleting a system folder, `curl | sh`):
+        // it asks whatever the policy, hooks or an earlier "always allow" say (see `danger.rs`)
+        let warning = if name == "shell" && kind == Kind::Exec { input.get("command").and_then(Value::as_str).and_then(crate::danger::floor) } else { None };
         // 1. helpers and plan mode: nothing that changes something runs, not even with a yes
         if self.helper.is_some() && (confirm.is_some() || matches!(kind, Kind::Edit | Kind::EditOutside | Kind::Exec)) {
             return Ok(Prepared::Done(ToolOutput::err("Not run: a helper only looks; it doesn't change files or run commands. If this needs doing, say so in your answer.")));
@@ -1350,10 +1353,10 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
         // 2. approval (fail closed); a hook can allow it or make it ask, PermissionRequest hooks
         // can answer for the user, and a helper can't ask. A call with `confirm` always asks the
         // user: no policy, hook or earlier "always allow" answers for them.
-        let mut ask = (self.policy.needs_approval(kind) && !self.allowed.contains(name) && !pre.allow) || pre.ask || confirm.is_some();
+        let mut ask = (self.policy.needs_approval(kind) && !self.allowed.contains(name) && !pre.allow) || pre.ask || confirm.is_some() || warning.is_some();
         if ask {
             let o = self.hook(session, "PermissionRequest", Some(&names), foreign(&input), cancel, on).await;
-            let allow = o.allow && confirm.is_none();
+            let allow = o.allow && confirm.is_none() && warning.is_none();
             if o.block.is_some() || allow {
                 session.append(SessionEvent::Approval { tool_use_id: id.to_string(), tool: name.to_string(), allowed: o.block.is_none(), by: "hook".into() }).await?;
             }
@@ -1366,23 +1369,27 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             if self.helper.is_some() {
                 return Ok(Prepared::Done(ToolOutput::err("Not run: this needs the user's OK, and a helper can't ask. If you need it, say so in your answer.")));
             }
-            let req = ApprovalRequest { tool_use_id: id.to_string(), tool: name.to_string(), kind, summary: summary.clone(), input: input.clone(), confirm: confirm.clone() };
+            let req = ApprovalRequest { tool_use_id: id.to_string(), tool: name.to_string(), kind, summary: summary.clone(), input: input.clone(), confirm: confirm.clone(), warning: warning.map(|w| format!("This command {w}.")) };
             let (decision, by) = tokio::select! {
                 d = self.approver.decide(&req) => d,
                 _ = cancel.cancelled() => return Ok(Prepared::Done(ToolOutput::err("Not run: stopped by the user."))),
             };
             let allowed = decision.allows(confirm.as_deref());
+            let nobody = by == "policy";
             session.append(SessionEvent::Approval { tool_use_id: id.to_string(), tool: name.to_string(), allowed, by }).await?;
             match decision {
                 Decision::Deny { reason } => {
                     let why = reason.filter(|r| !r.trim().is_empty()).map(|r| format!(" Reason: {r}")).unwrap_or_default();
-                    return Ok(Prepared::Done(ToolOutput::err(format!("The user declined this call.{why}"))));
+                    // (nobody to ask, for a command a person must allow: the model should know why)
+                    let floor = warning.filter(|_| nobody).map(|w| format!(" It {w}, so it runs only when a person allows it, and nobody can be asked here.")).unwrap_or_default();
+                    return Ok(Prepared::Done(ToolOutput::err(format!("The user declined this call.{why}{floor}"))));
                 }
                 _ if !allowed => {
                     let want = confirm.unwrap_or_default();
                     return Ok(Prepared::Done(ToolOutput::err(format!("Not run: this can't be undone, so it runs only when the user types \"{want}\" to confirm it in DevCat, and they didn't."))));
                 }
-                Decision::AllowForSession if confirm.is_none() => {
+                // (one with a warning is allowed this once: the next one asks again)
+                Decision::AllowForSession if confirm.is_none() && warning.is_none() => {
                     self.allowed.insert(name.to_string());
                 }
                 _ => {}

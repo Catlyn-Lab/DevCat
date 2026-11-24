@@ -597,9 +597,13 @@ function ApprovalCard({ item, ctx }: { item: ToolItem; ctx: ItemCtx }) {
             <Btn onClick={() => ctx.onDecide(item.id, { decision: "deny" })}>Deny</Btn>
             <Btn variant="primary" onClick={() => ctx.onDecide(item.id, { decision: "allow" })}>Allow</Btn>
           </div>
-          <button onClick={() => ctx.onDecide(item.id, { decision: "allow-for-session" })} className="w-full py-1.5 text-center text-[12.5px] font-semibold text-accent active:opacity-70">
-            Always allow {allowAllLabel(item.name)} in this chat
-          </button>
+          {req.warning ? (
+            <div className="text-[12px] text-danger">{req.warning} It asks every time, whatever this chat's permissions.</div>
+          ) : (
+            <button onClick={() => ctx.onDecide(item.id, { decision: "allow-for-session" })} className="w-full py-1.5 text-center text-[12.5px] font-semibold text-accent active:opacity-70">
+              Always allow {allowAllLabel(item.name)} in this chat
+            </button>
+          )}
         </div>
       )}
     </div>

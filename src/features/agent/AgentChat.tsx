@@ -481,11 +481,13 @@ function ApprovalCard({ item, tabId }: { item: ToolItem; tabId: string }) {
       {item.name === "edit" && <><div className="mb-1 font-mono text-[11.5px] text-muted">{str(i.path)}</div>{editChanges(i).map((c, n) => <Diff key={n} before={c.before} after={c.after} />)}</>}
       {item.name === "write" && <><div className="mb-1 font-mono text-[11.5px] text-muted">{str(i.path)}</div><Diff before="" after={str(i.content)} max={40} /></>}
       {!["shell", "edit", "write", "db_query", "devcat_note_write"].includes(item.name) && <Code>{req.summary}</Code>}
+      {/* a command a person must always allow: it asks every time, whatever the chat's setting */}
+      {req.warning && <div className="mt-2 flex items-start gap-1.5 text-[12.5px] text-danger"><ShieldAlert className="mt-0.5 size-3.5 shrink-0" />{req.warning} It asks every time, whatever this chat's permissions.</div>}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         <Button autoFocus size="sm" variant="primary" onClick={() => void answer(tabId, item.id, { decision: "allow" })}>Allow <kbd className="ml-1 opacity-60">↵</kbd></Button>
-        <Button size="sm" onClick={() => void answer(tabId, item.id, { decision: "allow-for-session" })}>
+        {!req.warning && <Button size="sm" onClick={() => void answer(tabId, item.id, { decision: "allow-for-session" })}>
           Always allow {allowAllLabel(item.name)} in this chat
-        </Button>
+        </Button>}
         <Button size="sm" variant="ghost" onClick={deny}>Deny <kbd className="ml-1 opacity-60">Esc</kbd></Button>
       </div>
     </div>
