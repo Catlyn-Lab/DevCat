@@ -505,6 +505,9 @@ pub struct Agent {
     checkpointed: bool,
     /// The user heard why no checkpoint could be taken (once a chat is enough).
     told_no_checkpoint: bool,
+    /// Only these tools run (a background review: see [`crate::review`]); the others are still
+    /// declared, so the requests start like the chat's, and refused when called.
+    pub(crate) only: Option<HashSet<String>>,
     /// Steps per turn before it stops with [`TurnEnd::StepLimit`]; 0 = no limit. [`MAX_STEPS`]
     /// by default.
     pub max_steps: u32,
@@ -522,7 +525,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(model: Arc<dyn Model>, tools: Registry, policy: Policy, approver: Arc<dyn Approver>, system: String) -> Agent {
-        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), checkpoints: None, checkpointed: false, told_no_checkpoint: false, max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
+        Agent { model, tools, policy, approver, system, context_window: None, hooks: Arc::default(), sandbox: false, inbox: Inbox::default(), checkpoints: None, checkpointed: false, told_no_checkpoint: false, only: None, max_steps: MAX_STEPS, allowed: HashSet::new(), helper: None, started: false, halt: None }
     }
 
     /// Run the hooks of `event` (see [`Hooks::run`]); what they say to the user is sent on. Stop
@@ -993,7 +996,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
             };
             // Helpers first, all at once: they only look, so they can't get in the way of the
             // other calls. Each result is reported as soon as it's in.
-            let jobs: Vec<(String, Value)> = calls.iter().filter(|(id, name, _)| name == SUBAGENT && self.helper.is_none() && !repeated.contains_key(id)).map(|(id, _, input)| (id.clone(), input.clone())).collect();
+            let jobs: Vec<(String, Value)> = calls.iter().filter(|(id, name, _)| name == SUBAGENT && self.helper.is_none() && self.only.is_none() && !repeated.contains_key(id)).map(|(id, _, input)| (id.clone(), input.clone())).collect();
             let mut helped = if cancel.is_cancelled() { HashMap::new() } else { self.helpers(session, jobs, cancel, on).await };
             let mut results = Vec::new();
             let mut usage = Usage::default();
@@ -1214,6 +1217,7 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
                 checkpoints: None,
                 checkpointed: false,
                 told_no_checkpoint: true,
+                only: None,
                 max_steps: HELPER_MAX_STEPS,
                 allowed: self.allowed.clone(),
                 helper: Some(id.to_string()),
@@ -1293,6 +1297,13 @@ Go on from the step marked [>] and keep the list up to date with `todo_write`.")
     /// runs), or with its result when it won't.
     #[allow(clippy::too_many_arguments)]
     async fn prepare(&mut self, session: &mut Session, ctx: &ToolCtx, id: &str, name: &str, input: Value, cancel: &Cancel, on: &mut (dyn FnMut(AgentEvent) + Send)) -> Result<Prepared> {
+        if let Some(only) = &self.only
+            && !only.contains(name)
+        {
+            let mut names: Vec<&str> = only.iter().map(String::as_str).collect();
+            names.sort();
+            return Ok(Prepared::Done(ToolOutput::err(format!("Not run: only {} run here.", names.join(", ")))));
+        }
         // the MCP tools left out of the requests: found here, declared from the next step on
         if name == TOOL_SEARCH {
             let query = input.get("query").and_then(Value::as_str).unwrap_or("").trim().to_string();

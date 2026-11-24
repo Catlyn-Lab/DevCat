@@ -1888,3 +1888,55 @@ async fn the_files_are_saved_before_a_turn_changes_them() {
     assert_eq!(std::fs::read_to_string(dir.join("proj/notes.txt")).unwrap(), "version = 1\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Stands in for the memory's `memory_save`: records what it was asked to save.
+struct FakeMemory(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl Tool for FakeMemory {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec { name: "memory_save".into(), description: "fake".into(), input_schema: json!({ "type": "object" }) }
+    }
+    fn kind(&self, _: &Value, _: &ToolCtx) -> Kind {
+        Kind::Edit
+    }
+    fn summary(&self, input: &Value) -> String {
+        input["name"].as_str().unwrap_or("").into()
+    }
+    async fn run(&self, input: Value, _: &ToolCtx) -> ToolOutput {
+        self.0.lock().unwrap().push(input["name"].as_str().unwrap_or("").into());
+        ToolOutput::ok("saved")
+    }
+}
+
+/// A review runs on a copy of the chat, saves to memory without asking, and runs nothing else.
+#[tokio::test]
+async fn a_review_saves_to_memory_and_does_nothing_else() {
+    let (dir, mut session) = project().await;
+    let saved = Arc::new(Mutex::new(Vec::new()));
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = Registry::standard().without(&["shell"]);
+    tools.add(FakeShell(ran.clone()));
+    tools.add(FakeMemory(saved.clone()));
+    let model = Scripted::new(vec![
+        vec![text("Use tabs, got it.")],
+        // the review: a command (refused), a save, the answer
+        vec![tool("x1", "shell", json!({ "command": "echo hi" })), tool("x2", "memory_save", json!({ "name": "indent-with-tabs", "body": "The user wants tabs." }))],
+        vec![text("indent-with-tabs")],
+    ]);
+    let mut agent = Agent::new(model, tools, Policy::Ask, Arc::new(DenyAll), "s".into());
+    agent.turn(&mut session, "I always use tabs, remember that", &Cancel::default(), &mut |_| {}).await.unwrap();
+    let before = session.events().len();
+    let review = agent.reviewer(&session).await.unwrap().expect("it has memory");
+    let done = review.run(&Cancel::default()).await.unwrap();
+    assert_eq!(done.saved, ["indent-with-tabs"]);
+    assert_eq!(*saved.lock().unwrap(), ["indent-with-tabs"]);
+    assert!(ran.lock().unwrap().is_empty(), "the review ran a command");
+    // the chat's own log is as it was; the review's copy is next to the helpers'
+    assert_eq!(Session::open(session.path()).await.unwrap().events().len(), before);
+    assert_eq!(std::fs::read_dir(session.path().with_extension("agents")).unwrap().count(), 1);
+    // without memory there's nothing to review
+    let plain = Agent::new(Scripted::new(vec![]), Registry::standard(), Policy::Ask, Arc::new(DenyAll), "s".into());
+    assert!(plain.reviewer(&session).await.unwrap().is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -482,7 +482,7 @@ export interface HermesSettings { model: string; provider: string; baseUrl: stri
 /** A model an agent connection offers; `price` is its list price in US dollars per million tokens. */
 export interface AgentModel { id: string; context: number | null; price?: { input: number; output: number; cacheRead: number | null } | null }
 
-export interface AgentSettings { protocol: "openai-chat" | "openai-responses" | "anthropic"; baseUrl: string; model: string; /** Steps per turn before it pauses; 0 = no limit, absent = 200. */ maxSteps?: number | null; /** Coding agents may hand it work (`agent_delegate`). */ delegate?: boolean }
+export interface AgentSettings { protocol: "openai-chat" | "openai-responses" | "anthropic"; baseUrl: string; model: string; /** Steps per turn before it pauses; 0 = no limit, absent = 200. */ maxSteps?: number | null; /** Coding agents may hand it work (`agent_delegate`). */ delegate?: boolean; /** Looks back over chats and saves what's worth keeping to memory. */ learn?: boolean; /** Another DevCat Agent connection's id, used while this one's provider fails. */ fallback?: string | null }
 export interface AiEnvVar { key: string; value: string }
 /** Saved AI connection: the coding-agent CLI the AI workspace terminal runs. */
 export interface AiProvider {
@@ -687,6 +687,8 @@ export type AgentLiveEvent =
   | { type: "hook"; event: string; message: string }
   /** The project's files were saved (`commit`) before the change event `at` of the log answers. */
   | { type: "checkpoint"; commit: string; at: number; label: string }
+  /** The agent looked back over the chat (in the background) and saved these memory entries. */
+  | { type: "reviewed"; saved: string[]; usage: AgentUsage }
   /** A message sent while the agent works: shown at once, read before its next step. */
   | { type: "queued"; text: string; attachments?: string[] }
   /** A queued message is now in the conversation, or (`blocked`) a hook refused it. */

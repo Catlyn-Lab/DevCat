@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::oneshot;
 
 static DIR: OnceCell<PathBuf> = OnceCell::new();
@@ -197,6 +197,13 @@ struct Run {
     /// The user put the files back to a checkpoint (`agent_restore`): the model hears it with the
     /// next message, or it would go on from files that aren't there anymore.
     restored: Mutex<Option<String>>,
+    /// The model the chat chose (the connection's, or one picked in the chat): the agent's model may
+    /// name its fallback's while that takes the steps.
+    model: Mutex<String>,
+    /// Turns answered since the agent last looked back over the chat to learn from it.
+    since_review: AtomicU32,
+    /// The review running now (a new message stops it: the chat has moved on).
+    review: Mutex<Option<Cancel>>,
 }
 
 /// Rules, skills and MCP servers the agent found for the folder.
@@ -701,7 +708,7 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
             context.notices.push(format!("Can't work on {} yet: {why} The agent tries again with each file or command.", h.label));
         }
     }
-    let mut agent = Agent::new(Arc::new(Llm::new(cfg.clone())), tools, Policy::Ask, approver.clone(), system);
+    let mut agent = Agent::new(model_of(provider_id, cfg.clone()), tools, Policy::Ask, approver.clone(), system);
     agent.hooks = Arc::new(hooks);
     // the OS sandbox guards this computer: commands on an SSH host don't run in it
     agent.sandbox = ghost.is_none() && remote.is_none() && sandbox_saved(&session.id);
@@ -712,6 +719,7 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
     }
     let log = Snapshot::of(&agent, &session);
     let inbox = agent.inbox.clone();
+    let chosen = cfg.model.clone();
     let run = Arc::new(Run {
         id,
         cwd: cwd.to_string(),
@@ -735,6 +743,9 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
         remote,
         ssh_tools,
         restored: Mutex::default(),
+        since_review: AtomicU32::new(0),
+        review: Mutex::default(),
+        model: Mutex::new(chosen),
     });
     // MCP servers start in the background: the chat opens right away and gets their tools when
     // they're ready (between turns, never in the middle of one).
@@ -1266,6 +1277,10 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
     let cancel = Cancel::default();
     *run.cancel.lock() = cancel.clone();
     run.since.store(now_ms(), Ordering::SeqCst);
+    // the chat moves on: a review of it as it was is no use anymore
+    if let Some(r) = run.review.lock().take() {
+        r.cancel();
+    }
     Ok(Some(tokio::spawn(async move {
         let started = std::time::Instant::now();
         let ap = run.approver.clone();
@@ -1276,11 +1291,14 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         let (agent, session) = &mut *g;
         agent.policy = policy;
         // a new model or effort from this message on (the same connection and key)
-        let want = model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| agent.model.name());
+        let chosen = run.model.lock().clone();
+        let want = model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| chosen.clone());
         let effort = effort.unwrap_or(*run.effort.lock());
-        if want != agent.model.name() || effort != *run.effort.lock() {
-            agent.model = Arc::new(Llm::new(devcat_harness::LlmConfig { model: want, effort, ..run.cfg.clone() }));
+        // (also when a fallback took the last steps: each message tries the chosen model again)
+        if want != chosen || effort != *run.effort.lock() || agent.model.name() != want {
+            agent.model = model_of(&run.provider_id, devcat_harness::LlmConfig { model: want.clone(), effort, ..run.cfg.clone() });
             *run.effort.lock() = effort;
+            *run.model.lock() = want;
         }
         agent.context_window = context_window.filter(|&w| w > 0);
         agent.max_steps = crate::ai::agent_max_steps(&run.provider_id);
@@ -1322,7 +1340,17 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
                     None
                 }
             };
-            let Some(((first, first_images, first_context), rest)) = next else { break (end, error) };
+            let Some(((first, first_images, first_context), rest)) = next else {
+                // time to look back over the chat (see `review_due`): set up now, run without the chat
+                if res.as_ref().is_ok_and(|e| *e == devcat_harness::TurnEnd::Answered) && review_due(&run, session) {
+                    match agent.reviewer(session).await {
+                        Ok(Some(r)) => start_review(&run, r),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("couldn't start a review of chat {}: {e}", run.id),
+                    }
+                }
+                break (end, error);
+            };
             // the others are read at its first step
             for (t, i, c) in rest {
                 agent.inbox.push_with(t, i, c);
@@ -1344,6 +1372,56 @@ async fn start_turn(session_id: &str, text: String, policy: Policy, model: Optio
         chat_changed(&run.id);
         (end, error)
     })))
+}
+
+/// The model a chat of `provider_id` takes its steps with: `cfg`'s, with the connection's fallback
+/// (`AgentSettings::fallback`) for when its provider fails.
+fn model_of(provider_id: &str, cfg: devcat_harness::LlmConfig) -> Arc<dyn devcat_harness::Model> {
+    let primary: Arc<dyn devcat_harness::Model> = Arc::new(Llm::new(cfg));
+    match crate::ai::agent_fallback(provider_id) {
+        Some((_, backup)) => Arc::new(devcat_harness::fallback::Fallback::new(primary, Arc::new(Llm::new(backup)))),
+        None => primary,
+    }
+}
+
+/// Turns between two looks back over a chat (see [`review_due`]).
+const REVIEW_EVERY: u32 = 5;
+
+/// Tool calls in one turn that make it worth a look back right away: a long piece of work.
+const REVIEW_AFTER_CALLS: usize = 15;
+
+/// Whether to look back over the chat now (`devcat_harness::review`): its connection learns
+/// (`AgentSettings::learn`), it's a chat someone is in (not a ghost chat or a scheduled job's), and
+/// [`REVIEW_EVERY`] turns have passed or this one was long. Counts the turn.
+fn review_due(run: &Run, session: &Session) -> bool {
+    if run.ghost.is_some() || run.owner == SCHEDULE || !crate::ai::agent_learns(&run.provider_id) {
+        return false;
+    }
+    let turns = run.since_review.fetch_add(1, Ordering::SeqCst) + 1;
+    let from = session.events().iter().rposition(|e| matches!(e, SessionEvent::User { hook: None, .. })).unwrap_or(0);
+    let calls: usize = session.events()[from..].iter().map(|e| match e {
+        SessionEvent::Assistant { content, .. } => content.iter().filter(|b| matches!(b, Block::ToolUse { .. })).count(),
+        _ => 0,
+    }).sum();
+    let due = turns >= REVIEW_EVERY || calls >= REVIEW_AFTER_CALLS;
+    if due {
+        run.since_review.store(0, Ordering::SeqCst);
+    }
+    due
+}
+
+/// Run a review in the background; what it saved is shown in the chat.
+fn start_review(run: &Arc<Run>, r: devcat_harness::review::Reviewer) {
+    let cancel = Cancel::default();
+    *run.review.lock() = Some(cancel.clone());
+    let id = run.id.clone();
+    tokio::spawn(async move {
+        match r.run(&cancel).await {
+            Ok(done) if !done.saved.is_empty() => emit(&id, json!({ "type": "reviewed", "saved": done.saved, "usage": done.usage })),
+            Ok(_) | Err(devcat_harness::Error::Cancelled) => {}
+            Err(e) => eprintln!("the review of chat {id} stopped: {e}"),
+        }
+    });
 }
 
 /// End a turn whose task panicked (`why`: the panic's message): the chat gets a `turnEnd` with
