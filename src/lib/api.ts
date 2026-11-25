@@ -8,6 +8,7 @@ import type {
   GitRepo, GitLogQuery, GitCommit, GitCommitDetail, GitBlame, GitRefs, GitStash, CommitAction, RemoteOpts,
   AiDetect, AiProvider, AiUsage,
   ClaudeInfo, ClaudeProject, ClaudeStartOptions, FileEntry, FilePreview, FileVersions, GitStatus, SessionMeta,
+  TodoChange, TodoList, TodoSummary,
   Note, ConnectionConfig, ExecOptions, NetKind, NetProfile, NetProfileFull, NetHelperStatus, NetStatus, NetTools, Project, McpSyncPlan, McpAuditEntry, Memory, MemoryKind, MemoryPlace, PlaceMemories, ClaudeImportPlan, MemorySyncReport, MemoryPeer, MemoryPeersStatus, MemoryTicket, MemoryPeerReport, MemorySyncActivity, SshConfigHost, ForwardStatus, TrafficSample, HistoryEntry, NodeKind, QueryResult, RowChange,
   SavedQuery, SchemaSnapshot, TableDataPage, TableDataRequest, TableRef, TableStructure, TreeNode, Bookmark,
   ReviewDoc, ReviewInfo, ReviewRendered,
@@ -33,6 +34,12 @@ export const api = {
   notesList: () => invoke<Note[]>("notes_list"),
   noteSave: (note: Note) => invoke<Note>("note_save", { note }),
   noteDelete: (id: string) => invoke<void>("note_delete", { id }),
+
+  // To do (agents keep it with todo_write). Event "devcat://todos" ({ key }) after every change.
+  todosLists: () => invoke<TodoSummary[]>("todos_lists"),
+  todosGet: (place: { key: string } | { projectId: string }) =>
+    invoke<TodoList>("todos_get", { key: "key" in place ? place.key : null, projectId: "projectId" in place ? place.projectId : null }),
+  todosEdit: (key: string, changes: TodoChange[], remove: string[] = []) => invoke<TodoList>("todos_edit", { key, changes, remove }),
 
   // page review (Review tab). Events: "review://changed" (ReviewChanged), "review://page" (ReviewPage)
   reviewStart: (target: { url: string } | { path: string }, projectId?: string | null) =>

@@ -694,3 +694,40 @@ export type AgentLiveEvent =
   /** A queued message is now in the conversation, or (`blocked`) a hook refused it. */
   | { type: "userMessage"; text: string; blocked?: boolean }
   | { type: "turnEnd"; end: "answered" | "stepLimit" | "stopped" | "error"; error: string | null; usage: AgentUsage; title: string; elapsedMs: number; /** Sent while it worked, not read (it stopped or failed). */ unsent?: string[] };
+
+/** To do (agents keep it with `todo_write`; src-tauri/src/todos). */
+export type TodoGroup = "running" | "next" | "waiting_on_others" | "waiting_on_you" | "done";
+
+export interface TodoItem {
+  id: string;
+  text: string;
+  group: TodoGroup;
+  waitingOn?: string | null;
+  links?: string[];
+  owner?: string | null;
+  /** RFC 3339 */
+  updatedAt: string;
+}
+
+export interface TodoList {
+  key: string;
+  place: MemoryPlace;
+  label: string;
+  updatedAt: string;
+  items: TodoItem[];
+}
+
+export interface TodoSummary {
+  key: string;
+  place: MemoryPlace;
+  label: string;
+  updatedAt: string;
+  /** Items not done. */
+  open: number;
+}
+
+/** A change from the To do panel: tick done, move. */
+export interface TodoChange {
+  id: string;
+  group?: TodoGroup;
+}

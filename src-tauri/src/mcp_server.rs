@@ -105,6 +105,7 @@ pub fn main(args: &[String]) -> i32 {
     // with DevCat open, tool calls run there (agent_bridge.rs)
     crate::agent_bridge::use_from(dir.clone());
     crate::memory::init(dir.clone());
+    crate::todos::init(dir.clone());
     // which DevCat Agent connections take delegated work (`agent_delegate` is offered only then)
     crate::ai::init(dir.clone());
     crate::mcp_audit::init(dir.clone());
@@ -189,6 +190,7 @@ pub(crate) fn tools_for(scope: &Scope, client: &str, in_app: bool) -> Vec<Arc<dy
         return tools;
     }
     tools.extend(crate::agent_notes::for_scope(scope));
+    tools.extend(crate::todos::tools::for_scope(scope, client));
     if crate::rooms_tools::allowed_anywhere() && (!in_app || !crate::events::headless()) {
         tools.extend(crate::rooms_tools::tools(client, !in_app));
     }
@@ -437,8 +439,9 @@ fn instructions(server: &Server) -> String {
     let brief = crate::memory::brief(crate::memory::place_for(&server.scope).as_ref(), claude_own.as_deref());
     let rooms = if crate::rooms_tools::allowed_anywhere() { ROOMS } else { "" };
     let delegate = if server.scope.unattended { String::new() } else { delegating(&crate::ai::delegates().into_iter().map(|p| p.name).collect::<Vec<_>>()) };
+    let todo = if server.scope.unattended { "" } else { TODO };
     // first: agents cut long instructions (Claude Code does), and the brief and connection list run long
-    format!("{delegate}{brief}\n# Connections (DevCat)\n{}{rooms}", connections(&server.scope))
+    format!("{delegate}{brief}{todo}\n# Connections (DevCat)\n{}{rooms}", connections(&server.scope))
 }
 
 /// Told to agents when the user lets them hand work to other models (`agent_delegate`), so they
@@ -457,6 +460,11 @@ fn delegating(names: &[String]) -> String {
         names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
     )
 }
+
+/// Told to agents about the project's To do list (`todos/`).
+const TODO: &str = "\n# To do (DevCat)\nDevCat keeps the user's To do list for this project (running, next, waiting on others, waiting on you, done), shown in its To do panel. \
+When you start or resume work here, read it with `todo_list`; as you work, keep it current with `todo_write` (add what you plan, move items as they start, \
+block or finish, say who an item waits on, link PRs and issues), so the next session or agent continues from it.\n";
 
 /// Told to agents when a room lets them in (`rooms_tools.rs`).
 const ROOMS: &str = "\n\n# Rooms (DevCat)\nYour user shares documents with other people in DevCat rooms: files, a thread, tasks and a team memory (memory/ in the room). \
@@ -534,7 +542,7 @@ mod tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(init["result"]["serverInfo"]["name"], "devcat");
         let instructions = init["result"]["instructions"].as_str().unwrap();
-        assert!(instructions.contains("db_query") && instructions.contains("memory_search"), "{instructions}");
+        assert!(instructions.contains("db_query") && instructions.contains("memory_search") && instructions.contains("todo_write"), "{instructions}");
         assert!(!instructions.contains("# Delegating"), "nothing about delegating unless the user allowed a model");
         assert_eq!(*server.client.lock(), "codex");
         let newer = handle(&server, json!({ "id": 2, "method": "initialize", "params": { "protocolVersion": "2099-01-01" } })).await.unwrap();
@@ -626,7 +634,7 @@ mod tests {
         // DevCat's own tools: listed for what the folder has, and working over MCP
         let tools = handle(&server, json!({ "id": 5, "method": "tools/list" })).await.unwrap();
         let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-        for want in ["devcat_connection_add", "devcat_connection_test", "db_ddl", "db_export", "db_history", "net_status", "net_profile_save", "agent_jobs", "devcat_notes", "devcat_open_file"] {
+        for want in ["devcat_connection_add", "devcat_connection_test", "db_ddl", "db_export", "db_history", "net_status", "net_profile_save", "agent_jobs", "devcat_notes", "devcat_open_file", "todo_write", "todo_list"] {
             assert!(names.contains(&want), "{want} missing: {names:?}");
         }
         assert!(!names.iter().any(|n| n.starts_with("docker_") || n.starts_with("rmq_") || n.starts_with("k8s_")), "no tools for kinds the folder hasn't: {names:?}");

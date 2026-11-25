@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { AppWindow, ArrowUpCircle, Cable, ChevronDown, Crosshair, DoorOpen, Folder, Ghost, Layers, FolderPlus, GitBranch, ListTodo, LogOut, MousePointerClick, NotebookPen, PanelLeftClose, PanelLeftOpen, Plus, Shield, SquareArrowOutUpRight, Trash2, Users } from "lucide-react";
+import { AppWindow, ArrowUpCircle, Cable, ChevronDown, Crosshair, DoorOpen, Folder, Ghost, Layers, FolderPlus, GitBranch, ListChecks, ListTodo, LogOut, MousePointerClick, NotebookPen, PanelLeftClose, PanelLeftOpen, Plus, Shield, SquareArrowOutUpRight, Trash2, Users } from "lucide-react";
 import { openGhostChat } from "../../features/agent/ghost";
 import { useEffect, useState, type ReactNode } from "react";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
@@ -15,6 +15,8 @@ import "../../features/agent/schedule";
 import { AiConnectionsDialog, ProviderPicker } from "../../features/claude/AiProviders";
 import GitPanel from "../../features/git/GitPanel";
 import NotesPanel from "../../features/notes/NotesPanel";
+import TodoPanel from "../../features/todos/TodoPanel";
+import { useTodos } from "../../features/todos/store";
 import { openReviewDialog, ReviewUrlDialog } from "../../features/review/ReviewUrlDialog";
 import { createNote } from "../../features/notes/store";
 import { useConnections, useFocusProject } from "../../store/connections";
@@ -218,6 +220,10 @@ function ActivityBar() {
   const roomMentions = useRooms((s) => Object.values(s.mentions).reduce((a, b) => a + b, 0));
   // The agent is working on a ticket.
   const ticketsWorking = useTickets((s) => Object.keys(s.jobs).length > 0);
+  // The To do list of the focused project (or the newest one): a dot while something waits on the user.
+  const todoFocus = useConnections((s) => s.focusProjectId);
+  useEffect(() => { void useTodos.getState().load(todoFocus); }, [todoFocus]);
+  const waitingOnYou = useTodos((s) => s.list?.items.filter((i) => i.group === "waiting_on_you").length ?? 0);
   const item = (v: SidebarView, icon: ReactNode, title: string) => (
     <button
       data-tour={`sidebar-${v}`}
@@ -239,6 +245,7 @@ function ActivityBar() {
       {item("network", <Shield className="size-5" />, "VPN & SSH tunnels")}
       {item("git", <GitBranch className="size-5" />, "Git repositories")}
       {item("notes", <NotebookPen className="size-5" />, "Notes")}
+      {item("todos", <span className="relative"><ListChecks className="size-5" />{waitingOnYou > 0 && <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-warn" />}</span>, waitingOnYou > 0 ? `To do: ${waitingOnYou} waiting on you` : "To do: what your agents are running, what is next, what waits on someone")}
       {item("tickets", <span className="relative"><ListTodo className="size-5" />{ticketsWorking && <span className="absolute -top-0.5 -right-0.5 size-2 animate-pulse rounded-full bg-accent" />}</span>, ticketsWorking ? "Tickets: the agent is working on a ticket" : "Tickets: let the agent work through Jira, Trello and Linear tickets")}
       {item("rooms", <span className="relative"><Users className="size-5" />{(roomWaiting || roomMentions > 0) && <span className={`absolute -top-0.5 -right-0.5 size-2 rounded-full ${roomMentions > 0 ? "bg-accent" : "bg-warn"}`} />}</span>, roomWaiting ? "Rooms: someone wants to join" : roomMentions > 0 ? `Rooms: you were mentioned (${roomMentions})` : "Rooms: share documents and agents with other people")}
       <div className="flex-1" />
@@ -260,7 +267,7 @@ function Sidebar() {
     <div className="flex h-full flex-col bg-panel">
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
-          {sidebar === "connections" ? "Connections" : sidebar === "network" ? "VPN & Tunnels" : sidebar === "claude" ? "AI Workspace" : sidebar === "git" ? "Git" : sidebar === "notes" ? "Notes" : sidebar === "tickets" ? "Tickets" : "Rooms"}
+          {sidebar === "connections" ? "Connections" : sidebar === "network" ? "VPN & Tunnels" : sidebar === "claude" ? "AI Workspace" : sidebar === "git" ? "Git" : sidebar === "notes" ? "Notes" : sidebar === "todos" ? "To do" : sidebar === "tickets" ? "Tickets" : "Rooms"}
         </span>
         {sidebar === "connections" && (
           <IconButton title="New connection" onClick={() => openDialog(null)}><Plus className="size-4" /></IconButton>
@@ -280,7 +287,7 @@ function Sidebar() {
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
-        {sidebar === "connections" ? <ConnectionsSidebar /> : sidebar === "network" ? <NetworkPanel /> : sidebar === "claude" ? <ClaudePanel /> : sidebar === "git" ? <GitPanel /> : sidebar === "notes" ? <NotesPanel /> : sidebar === "tickets" ? <TicketsPanel /> : <RoomsPanel />}
+        {sidebar === "connections" ? <ConnectionsSidebar /> : sidebar === "network" ? <NetworkPanel /> : sidebar === "claude" ? <ClaudePanel /> : sidebar === "git" ? <GitPanel /> : sidebar === "notes" ? <NotesPanel /> : sidebar === "todos" ? <TodoPanel /> : sidebar === "tickets" ? <TicketsPanel /> : <RoomsPanel />}
       </div>
     </div>
   );

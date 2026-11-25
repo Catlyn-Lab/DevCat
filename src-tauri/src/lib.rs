@@ -55,6 +55,7 @@ mod secrets;
 mod state;
 mod store;
 mod tickets;
+mod todos;
 #[cfg(feature = "gui")]
 mod updater;
 #[cfg(feature = "gui")]
@@ -113,6 +114,7 @@ fn init_backend(dir: std::path::PathBuf) {
     network::start();
     notify::init(dir.clone());
     focus_folders::init(dir.clone());
+    todos::init(dir.clone());
     remote::init(dir.clone());
     // after remote access: sync uses its relay choice
     memory::sync::init(dir.clone());
@@ -492,6 +494,10 @@ pub fn run() {
             notes::notes_list,
             notes::note_save,
             notes::note_delete,
+            // To do (agents keep it with todo_write)
+            todos::todos_lists,
+            todos::todos_get,
+            todos::todos_edit,
             // AI connections (providers for the AI workspace terminal)
             agent::agent_open,
             agent::agent_send,

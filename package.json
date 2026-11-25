@@ -23,6 +23,7 @@
     "check:panes": "node --experimental-strip-types src/store/panes.check.ts",
     "check:agent": "node --experimental-strip-types src/features/agent/model.check.ts",
     "check:html-assets": "node --experimental-strip-types src/features/files/viewers/htmlAssets.check.ts",
+    "check:todos": "node --experimental-strip-types src/features/todos/model.check.ts",
     "check:review": "node src-tauri/src/review/inspector.check.mjs && node --experimental-strip-types src/features/review/overlay.check.ts"
   },
   "dependencies": {

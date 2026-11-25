@@ -50,7 +50,7 @@ function pollEvents() {
 }
 
 export async function listen(event: string, h: Handler): Promise<UnlistenFn> {
-  if (/^(pty|sftp|ssh|room)/.test(event)) pollEvents();
+  if (/^(pty|sftp|ssh|room|devcat:\/\/todos)/.test(event)) pollEvents();
   const set = handlers.get(event) ?? new Set<Handler>();
   set.add(h);
   handlers.set(event, set);
