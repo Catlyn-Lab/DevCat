@@ -464,7 +464,9 @@ fn delegating(names: &[String]) -> String {
 /// Told to agents about the project's To do list (`todos/`).
 const TODO: &str = "\n# To do (DevCat)\nDevCat keeps the user's To do list for this project (running, next, waiting on others, waiting on you, done), shown in its To do panel. \
 When you start or resume work here, read it with `todo_list`; as you work, keep it current with `todo_write` (add what you plan, move items as they start, \
-block or finish, say who an item waits on, link PRs and issues), so the next session or agent continues from it.\n";
+block or finish, say who an item waits on, link PRs and issues), so the next session or agent continues from it. \
+A pull request you reviewed goes to waiting on others, naming the author or reviewer it waits on, not to done; it goes back to next when the PR gets a new push \
+or review request, and to done only when it is merged or closed. Your own PR that waits for a review is waiting on others too.\n";
 
 /// Told to agents when a room lets them in (`rooms_tools.rs`).
 const ROOMS: &str = "\n\n# Rooms (DevCat)\nYour user shares documents with other people in DevCat rooms: files, a thread, tasks and a team memory (memory/ in the room). \
