@@ -39,7 +39,7 @@ export default function ReviewTab({ tab }: { tab: ReviewTabSpec }) {
   const [st, setSt] = useState<State | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [inspect, setInspectOn] = useState(true);
+  const [inspect, setInspectOn] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [area, setArea] = useState({ w: 0, h: 0 });
   const idRef = useRef<string | null>(null);
@@ -75,7 +75,7 @@ export default function ReviewTab({ tab }: { tab: ReviewTabSpec }) {
       win.listen<ReviewPage>("review://page", ({ payload: p }) => {
         if (p.id !== idRef.current) return;
         setSt((s) => s && { ...s, url: p.url, inspectable: p.inspectable });
-        if (p.inspectable) setInspectOn(true); // every page load starts the inspector on
+        setInspectOn(false); // every page load starts the inspector off: turn it on with Inspect or I
       }),
       // a link or window.open asking for a new window: a new review tab, like a browser's new tab
       win.listen<{ id: string; url: string }>("review://new-window", ({ payload: p }) => {
