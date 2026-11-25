@@ -405,6 +405,11 @@ untrusted**: anyone's code can run in it. Keep these rules:
   the tab starts a new review instead (`review_nav` returns `false`). So DevCat calls into the page (`webview::call`: notes, highlight) only
   while the webview's top-level URL is the review's own (`channel::may_tell_page`): another site could define
   `window.__devcatReview` itself and read the notes.
+- **Images on notes come from the user, never the page** (`images.rs`): added in DevCat's notes list, checked by
+  their bytes (PNG, JPEG, GIF, WebP; `MAX_BYTES`), kept as files in `<data>/review-images/<review id>/`, and named in
+  the text by path, never inlined. Sending a review to an agent on an SSH host (`review_text_for`) copies only files
+  `images::refs` finds under that folder, so text can't make it upload anything else. Unnamed images go at close and
+  at start (`images::prune`).
 - **Desktop only**, like the SSH workbench and rooms: keep `review_*` out of `src-tauri/src/remote/dispatch.rs`,
   `mobile/` and the browser build.
 

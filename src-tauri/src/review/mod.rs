@@ -2,6 +2,7 @@
 
 pub mod channel;
 pub mod format;
+pub mod images;
 pub mod intake;
 pub mod remote;
 pub mod serve;
@@ -40,6 +41,9 @@ pub struct ReviewNote {
     pub source: Option<String>,
     pub style: Option<String>,
     pub comment: String,
+    /// Image files added to the note in DevCat (`images.rs`), by name. Never from the page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// What is being reviewed.
@@ -125,6 +129,10 @@ fn edit_note(r: &mut Review, n: u32, comment: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn note_mut(r: &mut Review, n: u32) -> AppResult<&mut ReviewNote> {
+    r.doc.notes.iter_mut().find(|x| x.n == n).ok_or_else(|| AppError::Msg(format!("No comment number {n}")))
+}
+
 fn remove_note(r: &mut Review, n: u32) -> AppResult<()> {
     let i = r
         .doc
@@ -177,7 +185,7 @@ impl ReviewStore {
                     return Err(AppError::Msg(format!("A review holds at most {MAX_NOTES} comments")));
                 }
                 let n = r.doc.notes.len() as u32 + 1;
-                r.doc.notes.push(ReviewNote { n, page, width, selector, text, source, style, comment });
+                r.doc.notes.push(ReviewNote { n, page, width, selector, text, source, style, comment, images: vec![] });
                 r.saved = false;
                 r.rev += 1;
             }
@@ -220,11 +228,51 @@ impl ReviewStore {
         Ok(r.doc.clone())
     }
 
-    /// Renders the review for the user to check, and remembers that text for `shown`.
-    pub fn render(&self, id: &str, styles: bool, date: &str) -> AppResult<Rendered> {
+    /// Adds an image (saved by `images::add`) to a note.
+    pub fn add_image(&self, id: &str, n: u32, name: String) -> AppResult<ReviewDoc> {
         let mut map = self.reviews.lock();
         let r = map.get_mut(id).ok_or_else(no_review)?;
-        let text = format::render(&r.doc, styles, date);
+        let note = note_mut(r, n)?;
+        if note.images.len() >= images::MAX_PER_NOTE {
+            return Err(AppError::Msg(format!("A comment holds at most {} images", images::MAX_PER_NOTE)));
+        }
+        note.images.push(name);
+        r.saved = false;
+        r.rev += 1;
+        Ok(r.doc.clone())
+    }
+
+    /// Takes an image off a note (its file stays until no saved review names it: `images::prune`).
+    pub fn remove_image(&self, id: &str, n: u32, name: &str) -> AppResult<ReviewDoc> {
+        let mut map = self.reviews.lock();
+        let r = map.get_mut(id).ok_or_else(no_review)?;
+        let note = note_mut(r, n)?;
+        let before = note.images.len();
+        note.images.retain(|x| x != name);
+        if note.images.len() != before {
+            r.saved = false;
+            r.rev += 1;
+        }
+        Ok(r.doc.clone())
+    }
+
+    /// Whether a note of the review has this image.
+    pub fn has_image(&self, id: &str, name: &str) -> bool {
+        self.reviews.lock().get(id).is_some_and(|r| r.doc.notes.iter().any(|n| n.images.iter().any(|x| x == name)))
+    }
+
+    /// Ids of the reviews in progress.
+    pub fn ids(&self) -> Vec<String> {
+        self.reviews.lock().keys().cloned().collect()
+    }
+
+    /// Renders the review for the user to check, and remembers that text for `shown`. `images` is
+    /// `<data>/review-images` (none: notes' images aren't listed).
+    pub fn render(&self, id: &str, styles: bool, date: &str, images: Option<&Path>) -> AppResult<Rendered> {
+        let mut map = self.reviews.lock();
+        let r = map.get_mut(id).ok_or_else(no_review)?;
+        let dir = images.map(|root| root.join(&r.id));
+        let text = format::render(&r.doc, styles, date, dir.as_deref());
         r.rendered = Some((r.rev, styles, text.clone()));
         Ok(Rendered { text, rev: r.rev })
     }
@@ -654,14 +702,14 @@ mod start_tests {
         let s = ReviewStore::default();
         let r = s.start(Target::Url { origin: "http://localhost:3000".into() }, "/".into(), None, "w".into());
         s.apply(&r.id, &r.secret, &add("seen")).unwrap();
-        let shown = s.render(&r.id, false, "7 Nov 2026").unwrap();
+        let shown = s.render(&r.id, false, "7 Nov 2026", None).unwrap();
         s.apply(&r.id, &r.secret, &add("unseen")).unwrap();
         let e = save_review(&s, &notes, &projects, &r.id, false, shown.rev).unwrap_err();
         assert!(e.to_string().contains("check it again"), "{e}");
         assert!(notes.list().unwrap().is_empty());
         assert!(!s.get(&r.id).unwrap().saved);
         // a hello (size only) doesn't count as a change
-        let again = s.render(&r.id, false, "7 Nov 2026").unwrap();
+        let again = s.render(&r.id, false, "7 Nov 2026", None).unwrap();
         s.apply(&r.id, &r.secret, &serde_json::json!({"kind":"hello","page":"/","width":500,"height":400,"missing":[]})).unwrap();
         // other styles than were shown: refused too
         assert!(save_review(&s, &notes, &projects, &r.id, true, again.rev).is_err());
@@ -671,7 +719,7 @@ mod start_tests {
         assert!(s.get(&r.id).unwrap().saved);
         // saved again: the same note, updated
         s.edit(&r.id, 1, "changed").unwrap();
-        let third = s.render(&r.id, false, "8 Nov 2026").unwrap();
+        let third = s.render(&r.id, false, "8 Nov 2026", None).unwrap();
         let again_saved = save_review(&s, &notes, &projects, &r.id, false, third.rev).unwrap();
         assert_eq!(again_saved.id, saved.id);
         assert_eq!(notes.list().unwrap().len(), 1);

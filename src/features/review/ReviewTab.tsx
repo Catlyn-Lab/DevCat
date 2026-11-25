@@ -3,7 +3,7 @@
 // and Finish are ordinary DevCat UI. The page is hidden whenever a DevCat overlay would be behind
 // it (overlay.ts), and the tab never toasts: a toast over the page would hide it too.
 import clsx from "clsx";
-import { ArrowLeft, Ellipsis, MousePointerClick, RotateCw, X } from "lucide-react";
+import { ArrowLeft, Ellipsis, ImagePlus, MousePointerClick, RotateCw, Send, X } from "lucide-react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Button, Checkbox, Dialog, ErrorBox, IconButton, Spinner, Textarea, Toolbar } from "../../components/ui";
@@ -12,9 +12,11 @@ import type { ReviewChanged, ReviewDoc, ReviewNote, ReviewPage, ReviewRendered }
 import type { Tab } from "../../tabs/types";
 import { setCloseGuard, useTabVisible, useTabs } from "../../store/tabs";
 import { useConnections } from "../../store/connections";
-import { displayPath, isRemote } from "../../lib/remotePath";
+import { displayPath, isRemote, remoteHost } from "../../lib/remotePath";
 import { useFonts } from "../appearance/fonts";
+import { pasteToClaude, useClaude } from "../claude/store";
 import { copyText } from "../claude/util";
+import { toBase64 } from "../files/drop";
 import { useContextMenu } from "../connections/ContextMenu";
 import { confirmDialog } from "../connections/dialogs";
 import { useNotes } from "../notes/store";
@@ -318,17 +320,36 @@ function NoteRow({ id, note, missing, onError }: { id: string; note: ReviewNote;
     setEditing(null);
     if (text && text !== note.comment) api.reviewEdit(id, note.n, text).then(() => onError(null), (e) => onError(errMsg(e)));
   };
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [dropping, setDropping] = useState(false);
+  const addImages = async (files: File[]) => {
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (!imgs.length) return false;
+    try {
+      for (const f of imgs) await api.reviewImageAdd(id, note.n, await toBase64(f));
+      onError(null);
+    } catch (e) { onError(errMsg(e)); }
+    return true;
+  };
   const keys = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); save(); }
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setEditing(null); }
   };
   return (
     <div
-      className="group flex gap-2 border-b border-line px-3 py-2 hover:bg-hover/50"
+      className={clsx("group flex gap-2 border-b border-line px-3 py-2 outline-none hover:bg-hover/50 focus-visible:bg-hover/50", dropping && "bg-accent/10")}
       onMouseEnter={() => quiet(api.reviewHighlight(id, note.n, false))}
       onClick={() => editing === null && quiet(api.reviewHighlight(id, note.n, true))}
       onDoubleClick={() => setEditing(note.comment)}
       title={`${note.page} · ${note.width}px wide`}
+      tabIndex={0}
+      onPaste={(e) => {
+        const files = [...e.clipboardData.files];
+        if (files.some((f) => f.type.startsWith("image/"))) { e.preventDefault(); void addImages(files); }
+      }}
+      onDragOver={(e) => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDropping(true); } }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false); }}
+      onDrop={(e) => { if (e.dataTransfer.files.length) { e.preventDefault(); setDropping(false); void addImages([...e.dataTransfer.files]); } }}
     >
       <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-accent-fg">{note.n}</span>
       <div className="min-w-0 flex-1">
@@ -348,8 +369,25 @@ function NoteRow({ id, note, missing, onError }: { id: string; note: ReviewNote;
         ) : (
           <div className="whitespace-pre-wrap break-words text-[13px]">{note.comment}</div>
         )}
+        {!!note.images?.length && (
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {note.images.map((name) => (
+              <NoteImage key={name} id={id} name={name}
+                onRemove={() => api.reviewImageRemove(id, note.n, name).then(() => onError(null), (err) => onError(errMsg(err)))} />
+            ))}
+          </div>
+        )}
         {missing && <div className="mt-0.5 text-[11px] text-warn">not found on this page</div>}
       </div>
+      <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden
+        onChange={(e) => { const files = [...(e.target.files ?? [])]; e.target.value = ""; void addImages(files); }} />
+      <IconButton
+        title="Add image (or paste / drop one on the note)"
+        className="opacity-0 group-hover:opacity-100"
+        onClick={(e) => { e.stopPropagation(); fileInput.current?.click(); }}
+      >
+        <ImagePlus className="size-3.5" />
+      </IconButton>
       <IconButton
         title="Remove note"
         className="opacity-0 group-hover:opacity-100"
@@ -361,12 +399,70 @@ function NoteRow({ id, note, missing, onError }: { id: string; note: ReviewNote;
   );
 }
 
+/** A note's image: a thumbnail (click for full size), with a remove button. */
+function NoteImage({ id, name, onRemove }: { id: string; name: string; onRemove: () => void }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [big, setBig] = useState(false);
+  useEffect(() => {
+    let gone = false;
+    api.reviewImage(id, name).then((u) => { if (!gone) setSrc(u); }, () => {});
+    return () => { gone = true; };
+  }, [id, name]);
+  return (
+    <div className="group/img relative size-14 overflow-hidden rounded border border-line bg-app" onClick={(e) => e.stopPropagation()}>
+      {src ? <img src={src} alt="" className="size-full cursor-zoom-in object-cover" onClick={() => setBig(true)} /> : <Spinner className="m-auto mt-4 size-4" />}
+      <button type="button" title="Remove image"
+        className="absolute top-0.5 right-0.5 hidden rounded bg-panel/90 p-0.5 text-muted hover:text-fg group-hover/img:block"
+        onClick={onRemove}>
+        <X className="size-3" />
+      </button>
+      {big && src && (
+        <Dialog open onClose={() => setBig(false)} title="Image" width={900}>
+          <img src={src} alt="" className="mx-auto max-h-[70vh] max-w-full object-contain" />
+        </Dialog>
+      )}
+    </div>
+  );
+}
+
 /** The review as text, exactly what Save stores (the backend refuses to save text that changed since). */
 function FinishDialog({ id, onClose }: { id: string; onClose: () => void }) {
   const [styles, setStyles] = useState(false);
   const [shown, setShown] = useState<ReviewRendered | null>(null);
   const [line, setLine] = useState<{ text: string; tone: "ok" | "warn" | "danger" } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [sending, setSending] = useState(false);
+  const menu = useContextMenu();
+
+  /** Agent terminals running now: the review goes into one's prompt (on an SSH host, with its images copied there). */
+  const sendMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const tabs = useTabs.getState().tabs;
+    const running = Object.entries(useClaude.getState().tabs).filter(([, t]) => t.ptyId);
+    const images = (shown?.text.match(/^ {3}\(image: /gm) ?? []).length;
+    menu.show({ clientX: r.left, clientY: r.top - 4 }, running.length
+      ? running.map(([tabId, t]) => ({
+          label: `${tabs.find((x) => x.id === tabId)?.title ?? "Agent"} · ${isRemote(t.cwd) ? remoteHost(t.cwd) : displayPath(t.cwd)}`
+            + (isRemote(t.cwd) && images ? ` (copies ${images} image${images === 1 ? "" : "s"})` : ""),
+          onClick: () => void send(tabId, t.cwd),
+        }))
+      : [{ label: "No agent terminal is running", disabled: true, onClick: () => {} }]);
+  };
+  const send = async (tabId: string, cwd: string) => {
+    if (!shown) return;
+    setSending(true);
+    setLine(isRemote(cwd) ? { text: `Copying to ${remoteHost(cwd)}…`, tone: "ok" } : null);
+    try {
+      const text = await api.reviewTextFor(cwd, shown.text);
+      if (!(await pasteToClaude(tabId, text))) throw new Error("That agent isn't running any more");
+      useTabs.getState().activate(tabId);
+      onClose();
+    } catch (e) {
+      setLine({ text: errMsg(e), tone: "danger" });
+    } finally {
+      setSending(false);
+    }
+  };
 
   const render = useCallback(async (withStyles: boolean) => {
     try { setShown(await api.reviewRender(id, withStyles)); } catch (e) { setShown(null); setLine({ text: errMsg(e), tone: "danger" }); }
@@ -403,6 +499,10 @@ function FinishDialog({ id, onClose }: { id: string; onClose: () => void }) {
             <span className={clsx("mr-auto text-xs", line.tone === "ok" ? "text-ok" : line.tone === "warn" ? "text-warn" : "text-danger")}>{line.text}</span>
           )}
           <Button disabled={!shown} onClick={() => shown && void copyText(shown.text).then(() => setLine({ text: "Copied", tone: "ok" }))}>Copy review</Button>
+          <Button disabled={!shown} loading={sending} title="Type the review into an agent's prompt (on an SSH host its images are copied there)" onClick={sendMenu}>
+            <Send className="size-3.5" /> Send to…
+          </Button>
+          {menu.element}
           <Button variant="primary" loading={saving} disabled={!shown} onClick={() => void save()}>Save</Button>
         </>
       }
@@ -417,7 +517,8 @@ function FinishDialog({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="flex h-24 items-center justify-center"><Spinner /></div>
       )}
       <div className="mt-2 text-[11px] text-faint">
-        Saved as one note in this project's Notes. Finishing again updates the same note.
+        Saved as one note in this project's Notes. Finishing again updates the same note. Images are listed by their path on this
+        computer; Send to… an agent on an SSH host copies them there.
       </div>
     </Dialog>
   );

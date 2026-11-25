@@ -1,6 +1,7 @@
 //! The text a review is saved as: one instruction line, then one line per note.
 
 use super::{serve, ReviewDoc, ReviewNote, Target};
+use std::path::Path;
 
 /// Backticks are escaped and line breaks become spaces, so a value can't break out of its line.
 fn esc(s: &str) -> String {
@@ -27,8 +28,9 @@ fn prefix(doc: &ReviewDoc, note: &ReviewNote) -> String {
     }
 }
 
-/// Renders the review. `date` comes from the caller.
-pub fn render(doc: &ReviewDoc, styles: bool, date: &str) -> String {
+/// Renders the review. `date` comes from the caller; `images` is the review's image folder (a
+/// note's images are listed by their path there, for an agent to open).
+pub fn render(doc: &ReviewDoc, styles: bool, date: &str, images: Option<&Path>) -> String {
     let (title_where, header_where) = match &doc.target {
         Target::Url { origin } => {
             let host = origin.split_once("://").map_or(origin.as_str(), |(_, h)| h);
@@ -57,6 +59,11 @@ pub fn render(doc: &ReviewDoc, styles: bool, date: &str) -> String {
         if let (true, Some(style)) = (styles, &note.style) {
             out.push_str(&format!("   (style: {})\n", esc(style)));
         }
+        if let Some(dir) = images {
+            for name in &note.images {
+                out.push_str(&format!("   (image: {})\n", esc(&dir.join(name).to_string_lossy())));
+            }
+        }
     }
     out
 }
@@ -75,6 +82,7 @@ mod tests {
             source: None,
             style: None,
             comment: comment.into(),
+            images: vec![],
         }
     }
 
@@ -101,7 +109,7 @@ mod tests {
     #[test]
     fn format_matches_spec_example() {
         assert_eq!(
-            render(&spec_doc(), false, "7 Nov 2026"),
+            render(&spec_doc(), false, "7 Nov 2026", None),
             "UI review · localhost:5173/pricing · 7 Nov 2026\n\
 UI review of http://localhost:5173/pricing (1280×800). Format: `selector` \"visible text\" (source) → comment. Search the code for the text or classes when no source is given.\n\n\
 1. `h1` \"Simple pricing for growing teams\" (src/pages/Pricing.tsx:18) → too large on mobile, cap at 32px\n\
@@ -115,12 +123,12 @@ UI review of http://localhost:5173/pricing (1280×800). Format: `selector` \"vis
         let mut n = note(1, "/pricing", 1280, ".price", "$12", "bigger");
         n.style = Some("220×28, 20px/700, color rgb(29,35,48), bg transparent, pad 0px".into());
         let doc = url_doc(vec![n, note(2, "/pricing", 1280, ".cta", "Go", "x")]);
-        let with = render(&doc, true, "d");
+        let with = render(&doc, true, "d", None);
         assert!(with.contains(
             "1. `.price` \"$12\" → bigger\n   (style: 220×28, 20px/700, color rgb(29,35,48), bg transparent, pad 0px)\n2. "
         ));
         assert_eq!(with.matches("(style:").count(), 1);
-        assert!(!render(&doc, false, "d").contains("(style:"));
+        assert!(!render(&doc, false, "d", None).contains("(style:"));
     }
 
     #[test]
@@ -131,7 +139,7 @@ UI review of http://localhost:5173/pricing (1280×800). Format: `selector` \"vis
             note(3, "/checkout", 1280, "h1", "", "c"),
             note(4, "/pricing", 1280, "h1", "", "d"),
         ]);
-        let out = render(&doc, false, "d");
+        let out = render(&doc, false, "d", None);
         assert!(out.contains("1. [390w] `h1`"));
         assert!(out.contains("2. [/checkout 390w] `h1`"));
         assert!(out.contains("3. [/checkout] `h1`"));
@@ -147,7 +155,7 @@ UI review of http://localhost:5173/pricing (1280×800). Format: `selector` \"vis
             height: 768,
             notes: vec![note(1, "site/index.html", 1024, "h1", "Hi", "x")],
         };
-        let out = render(&doc, false, "7 Nov 2026");
+        let out = render(&doc, false, "7 Nov 2026", None);
         assert!(out.starts_with(
             "UI review · site/index.html · 7 Nov 2026\nUI review of site/index.html (1024×768). Format:"
         ));
@@ -168,30 +176,41 @@ UI review of http://localhost:5173/pricing (1280×800). Format: `selector` \"vis
                 note(3, "docs/bad%zz.html", 1024, "h1", "", "c"),
             ],
         };
-        let out = render(&doc, false, "d");
+        let out = render(&doc, false, "d", None);
         assert!(out.contains("UI review of docs/my page.html ("));
         assert!(out.contains("\n1. `h1` → a\n"));
         assert!(out.contains("\n2. [docs/other page.html] `h1` → b\n"), "{out}");
         assert!(out.contains("\n3. [docs/bad%zz.html] `h1` → c\n"), "malformed stays as it is");
         // URL targets keep the path as the browser shows it
         let doc = url_doc(vec![note(1, "/a%20b", 1280, "h1", "", "x")]);
-        assert!(render(&doc, false, "d").contains("1. [/a%20b] `h1`"));
+        assert!(render(&doc, false, "d", None).contains("1. [/a%20b] `h1`"));
     }
 
     #[test]
     fn format_escapes_hostile_values() {
         let doc = url_doc(vec![note(1, "/pricing", 1280, "h1", "", "a\nb `x` → c")]);
-        let out = render(&doc, false, "d");
+        let out = render(&doc, false, "d", None);
         assert_eq!(out.lines().filter(|l| l.starts_with("1. ")).count(), 1);
         assert!(out.contains("→ a b \\`x\\` → c"));
         let doc = url_doc(vec![note(1, "/p\r\nq", 1280, "a`b\nc", "t`\r", "k")]);
-        let out = render(&doc, false, "d");
+        let out = render(&doc, false, "d", None);
         assert!(out.contains("1. [/p  q] `a\\`b c` \"t\\` \" → k\n"));
     }
 
     #[test]
     fn empty_text_is_omitted() {
         let doc = url_doc(vec![note(1, "/pricing", 1280, "img.logo", "", "needs alt text")]);
-        assert!(render(&doc, false, "d").contains("\n1. `img.logo` → needs alt text\n"));
+        assert!(render(&doc, false, "d", None).contains("\n1. `img.logo` → needs alt text\n"));
+    }
+
+    #[test]
+    fn images_are_listed_by_path() {
+        let mut n = note(1, "/", 800, "h1", "Hi", "too big");
+        n.images = vec!["a.png".into(), "b.jpg".into()];
+        let doc = url_doc(vec![n]);
+        let dir = Path::new("/data/review-images/rv-1");
+        let out = render(&doc, false, "d", Some(dir));
+        assert!(out.contains(&format!("   (image: {})\n   (image: {})\n", dir.join("a.png").display(), dir.join("b.jpg").display())), "{out}");
+        assert!(!render(&doc, false, "d", None).contains("(image:"));
     }
 }
