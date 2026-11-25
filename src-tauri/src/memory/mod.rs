@@ -534,7 +534,7 @@ pub fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn safe(s: &str) -> String {
+pub(crate) fn safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect()
 }
 

@@ -681,6 +681,9 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
     }
     if ghost.is_none() {
         crate::agent_notes::add(&mut tools);
+        for t in crate::todos::tools::for_scope(&scope, "devcat-agent") {
+            tools.add_arc(t);
+        }
     }
     // the folder's earlier chats (`chat_search`): where connections are on, since what an agent
     // read from them (rows, logs) is in those chats too; never in a ghost chat, which keeps nothing

@@ -200,6 +200,9 @@ async fn call(cmd: &str, args: &Value) -> Result<Value, Value> {
         "mcp_sync_dismiss" => out(c!(crate::mcp_sync::mcp_sync_dismiss)),
         "mcp_audit" => out(c!(crate::mcp_audit::mcp_audit, "limit")),
         "mcp_audit_clear" => out(c!(crate::mcp_audit::mcp_audit_clear)),
+        "todos_lists" => out(c!(crate::todos::todos_lists)),
+        "todos_get" => out(c!(crate::todos::todos_get, "key", "projectId")),
+        "todos_edit" => out(c!(crate::todos::todos_edit, "key", "changes", "remove")),
         "memory_list" => out(c!(crate::memory::memory_list)),
         "memory_save" => out(c!(crate::memory::memory_save, "memory")),
         "memory_delete" => out(c!(crate::memory::memory_delete, "place", "name")),
@@ -265,6 +268,7 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     crate::mcp_sync::init(d.clone());
     crate::mcp_audit::init(d.clone());
     crate::memory::init(d.clone());
+    crate::todos::init(d.clone());
     let home = std::env::var_os("DEVBRIDGE_MCP_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| {
         let h = d.join("home");
         let _ = std::fs::create_dir_all(h.join(".codex"));
@@ -276,7 +280,7 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     // Rooms keep their identity and documents here (DEVBRIDGE_DATA: keep them across runs).
     crate::rooms::init(std::env::var_os("DEVBRIDGE_DATA").map(std::path::PathBuf::from).unwrap_or(d));
     crate::events::add_tap(|event, payload| {
-        if matches!(event, "pty-output" | "pty-exit" | "sftp-progress" | "sftp-done" | "ssh-forward" | "rooms-changed" | "room-join-request" | "room-join-resolved" | "room-agent" | "room-mention" | "tickets-job" | "tickets-changed") {
+        if matches!(event, "pty-output" | "pty-exit" | "sftp-progress" | "sftp-done" | "ssh-forward" | "rooms-changed" | "room-join-request" | "room-join-resolved" | "room-agent" | "room-mention" | "tickets-job" | "tickets-changed" | crate::todos::EVENT) {
             let mut q = EVENTS.lock();
             if q.len() < 20_000 {
                 q.push(json!({ "event": event, "payload": payload }));
