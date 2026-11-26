@@ -19,11 +19,35 @@ pub struct Ctx {
     pub here: Option<Place>,
     /// The agent (`claude-code`, `codex`, `devcat-agent`, …): new items' owner.
     pub origin: String,
+    /// The tools' names: [`MCP_NAMES`], or [`AGENT_NAMES`] in the DevCat Agent.
+    pub names: Names,
 }
 
-/// The To do tools for an agent working in `scope`.
+/// What the two tools are called.
+#[derive(Clone, Copy)]
+pub struct Names {
+    pub write: &'static str,
+    pub list: &'static str,
+}
+
+/// Over `devcat mcp`, where the client puts the server's name in front (`mcp__devcat__todo_write`).
+pub const MCP_NAMES: Names = Names { write: "todo_write", list: "todo_list" };
+/// In the DevCat Agent, whose own `todo_write` is the chat's checklist (the harness's): a request
+/// with two tools of one name is refused by the model provider ("Tool names must be unique").
+pub const AGENT_NAMES: Names = Names { write: "project_todo_write", list: "project_todo_list" };
+
+/// The To do tools for an agent working in `scope`, served over `devcat mcp`.
 pub fn for_scope(scope: &Scope, origin: &str) -> Vec<Arc<dyn Tool>> {
-    let ctx = Arc::new(Ctx { here: place_for(scope).filter(|p| *p != Place::Global), origin: origin.to_string() });
+    named(scope, origin, MCP_NAMES)
+}
+
+/// The To do tools for the DevCat Agent working in `scope` ([`AGENT_NAMES`]).
+pub fn for_agent(scope: &Scope) -> Vec<Arc<dyn Tool>> {
+    named(scope, "devcat-agent", AGENT_NAMES)
+}
+
+fn named(scope: &Scope, origin: &str, names: Names) -> Vec<Arc<dyn Tool>> {
+    let ctx = Arc::new(Ctx { here: place_for(scope).filter(|p| *p != Place::Global), origin: origin.to_string(), names });
     vec![Arc::new(TodoWrite(ctx.clone())), Arc::new(TodoListTool(ctx))]
 }
 
@@ -124,7 +148,7 @@ pub fn render(list: &TodoList, only: Option<Group>) -> String {
         if g == Group::Done && only.is_none() && items.len() > DONE_SHOWN {
             items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             items.truncate(DONE_SHOWN);
-            out.push_str(&format!("(newest {DONE_SHOWN}; `todo_list` with group \"done\" lists them all)\n"));
+            out.push_str(&format!("(newest {DONE_SHOWN}; reading the list with group \"done\" lists them all)\n"));
         }
         for i in items {
             out.push_str(&item_line(i));
@@ -145,8 +169,8 @@ struct TodoWrite(Arc<Ctx>);
 impl Tool for TodoWrite {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "todo_write".into(),
-            description: "Keep the user's To do list for this project current, in DevCat: what's running, what's next, what waits on someone else, what waits on the user, and what's done. It outlives your session (another agent, or you after a restart, picks it up with `todo_list`) and the user watches it in DevCat's To do panel. Update it as you work: add tasks when you plan, move one to running when you start it, to waiting_on_others / waiting_on_you when it's blocked (say on whom in `waiting_on`), to done when it's finished; add PR, issue or file links. `items` adds or updates items: an item with an `id` the list has changes only the fields you give; without an `id` (or a new one) it's added, with `text`. `remove` deletes items by id. `replace: true` makes `items` the whole list. Returns the list with the ids.".into(),
+            name: self.0.names.write.into(),
+            description: format!("Keep the user's To do list for this project current, in DevCat: what's running, what's next, what waits on someone else, what waits on the user, and what's done. It outlives your session (another agent, or you after a restart, picks it up with `{}`) and the user watches it in DevCat's To do panel. Update it as you work: add tasks when you plan, move one to running when you start it, to waiting_on_others / waiting_on_you when it's blocked (say on whom in `waiting_on`), to done when it's finished; add PR, issue or file links. `items` adds or updates items: an item with an `id` the list has changes only the fields you give; without an `id` (or a new one) it's added, with `text`. `remove` deletes items by id. `replace: true` makes `items` the whole list. Returns the list with the ids.", self.0.names.list),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -215,8 +239,8 @@ struct TodoListTool(Arc<Ctx>);
 impl Tool for TodoListTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "todo_list".into(),
-            description: "Read the user's To do list for this project (DevCat): what's running, next, waiting on others, waiting on the user, and done, with each item's id, who it waits on, its owner and links. Read it when you start or resume work in the project, before you change it with `todo_write`. `group` shows one group only.".into(),
+            name: self.0.names.list.into(),
+            description: format!("Read the user's To do list for this project (DevCat): what's running, next, waiting on others, waiting on the user, and done, with each item's id, who it waits on, its owner and links. Read it when you start or resume work in the project, before you change it with `{}`. `group` shows one group only.", self.0.names.write),
             input_schema: json!({
                 "type": "object",
                 "properties": { "group": { "type": "string", "enum": group_names() } }
@@ -255,6 +279,20 @@ mod tests {
 
     fn tool(tools: &[Arc<dyn Tool>], name: &str) -> Arc<dyn Tool> {
         tools.iter().find(|t| t.spec().name == name).cloned().unwrap()
+    }
+
+    #[test]
+    fn the_devcat_agent_gets_names_its_own_tools_dont_have() {
+        let standard: Vec<String> = devcat_harness::tools::Registry::standard().specs().into_iter().map(|s| s.name).collect();
+        let agent: Vec<String> = for_agent(&Scope::default()).iter().map(|t| t.spec().name).collect();
+        assert_eq!(agent, ["project_todo_write", "project_todo_list"]);
+        assert!(agent.iter().all(|n| !standard.contains(n)), "{agent:?} vs {standard:?}");
+        // each tool points at its partner by the name it has
+        let tools = for_agent(&Scope::default());
+        assert!(tools[0].spec().description.contains("`project_todo_list`"));
+        assert!(tools[1].spec().description.contains("`project_todo_write`"));
+        let mcp = for_scope(&Scope::default(), "codex");
+        assert!(mcp[0].spec().description.contains("`todo_list`") && mcp[1].spec().description.contains("`todo_write`"));
     }
 
     #[test]

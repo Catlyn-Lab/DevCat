@@ -52,7 +52,13 @@ async fn serves_the_folders_connections() {
     let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
     let memory = ["memory_search", "memory_read", "memory_save", "memory_forget", "handoff_write", "handoff_take"].map(|n| format!("mcp__devcat__{n}"));
     assert_eq!(names[..memory.len()], memory, "the shared memory first");
-    assert_eq!(names[memory.len()..], ["mcp__devcat__devcat_connections", "mcp__devcat__db_schema", "mcp__devcat__db_query"]);
+    let rest = [
+        "devcat_connections", "devcat_connection_test", "db_history", "db_saved_query_save", "devcat_open_file", "db_open_query", "devcat_connection_add",
+        "agent_jobs", "agent_job_save", "agent_job_run", "net_status", "net_profile_save", "db_schema", "db_query", "db_ddl", "db_import", "db_dump",
+        "db_export", "devcat_notes", "devcat_note_write", "todo_write", "todo_list",
+    ]
+    .map(|n| format!("mcp__devcat__{n}"));
+    assert_eq!(names[memory.len()..], rest);
     let list = call(&tools, "devcat_connections", json!({})).await;
     assert!(list.content.contains("Project Shop") && list.content.contains("shop-db") && list.content.contains("notes"), "{}", list.content);
     assert!(!list.content.contains("secret"), "AI access off: no agent sees it: {}", list.content);

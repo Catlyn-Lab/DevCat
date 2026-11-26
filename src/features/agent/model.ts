@@ -396,6 +396,9 @@ export function describe(name: string, input: Record<string, unknown> | null, st
       const todos = todoList(i);
       return { icon: ListTodo, verb: "Updated the plan", target: todos.length ? `${todos.filter((t) => t.status === "completed").length}/${todos.length} done` : "" };
     }
+    // the project's To do list (src-tauri/src/todos), not the chat's plan
+    case "project_todo_write": return { icon: ListTodo, verb: done ? "Updated the To do list" : "Updating the To do list", target: "" };
+    case "project_todo_list": return { icon: ListTodo, verb: done ? "Read the To do list" : "Reading the To do list", target: str(i.group) };
     default:
       if (name.startsWith("mcp__")) {
         const [, server, tool] = name.split("__");

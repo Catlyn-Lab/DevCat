@@ -194,11 +194,19 @@ impl Registry {
         r
     }
 
+    /// Adds `t`, unless the registry has a tool of that name already: the first one stays (the
+    /// model provider refuses a request with two tools of one name, "Tool names must be unique").
     pub fn add(&mut self, t: impl Tool + 'static) {
-        self.tools.push(Arc::new(t));
+        self.add_arc(Arc::new(t));
     }
 
+    /// [`Registry::add`] for a shared tool.
     pub fn add_arc(&mut self, t: Arc<dyn Tool>) {
+        let name = t.spec().name;
+        if self.tools.iter().any(|have| have.spec().name == name) {
+            eprintln!("devcat-harness: a second tool named {name} was left out");
+            return;
+        }
         self.tools.push(t);
     }
 
@@ -427,6 +435,19 @@ mod tests {
         assert_eq!(names(&r.search("query", 8)), ["mcp__pg__query"]);
         assert_eq!(names(&r.search("list_pulls, create_issue", 8)), ["mcp__github__create_issue", "mcp__github__list_pulls"]);
         assert!(r.search("zzz", 8).is_empty());
+    }
+
+    #[test]
+    fn a_second_tool_of_one_name_is_left_out() {
+        let mut r = Registry::standard();
+        let before = r.specs().len();
+        r.add(Mcp(TODO_WRITE, 10));
+        r.add_arc(Arc::new(Mcp("read", 10)));
+        assert_eq!(r.specs().len(), before);
+        // the first one stays: the checklist, not the newcomer
+        assert!(!r.get(TODO_WRITE).unwrap().deferrable());
+        r.add(Mcp("mcp__pg__query", 10));
+        assert_eq!(r.specs().len(), before + 1);
     }
 
     #[test]
