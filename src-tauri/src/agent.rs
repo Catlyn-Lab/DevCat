@@ -681,7 +681,8 @@ async fn build(cwd: &str, provider_id: &str, session: Session, origin: &str, own
     }
     if ghost.is_none() {
         crate::agent_notes::add(&mut tools);
-        for t in crate::todos::tools::for_scope(&scope, "devcat-agent") {
+        // named project_todo_*: `todo_write` is the chat's checklist here
+        for t in crate::todos::tools::for_agent(&scope) {
             tools.add_arc(t);
         }
     }

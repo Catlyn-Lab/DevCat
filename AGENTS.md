@@ -332,7 +332,9 @@ scrubber and `MAX_BODY` as saving); keep it that way for any new file kind.
 
 The To do list (`src-tauri/src/todos/`) is one list per place, named the way memory names places (a DevCat project,
 else the repository): `<data>/todos/<key>.json`, written whole and renamed into place. `todo_write` / `todo_list`
-(`todos/tools.rs`) are built into the DevCat Agent and served by `devcat mcp` (not to unattended ticket runs or room
+(`todos/tools.rs`) are served by `devcat mcp` and built into the DevCat Agent as `project_todo_write` /
+`project_todo_list`, since there `todo_write` is the chat's checklist and the model provider refuses two tools of one
+name (`Registry::add` keeps the first of a name) (not to unattended ticket runs or room
 agents); every change sends `devcat://todos` and the sidebar (`src/features/todos/`) reloads. A file that isn't
 valid JSON is moved aside on the next write, never overwritten. Like memory, it's desktop only: not in the phone
 dispatcher.

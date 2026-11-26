@@ -259,7 +259,8 @@ fn comment(b: &Board, f: &Flight) -> String {
     c
 }
 
-#[cfg(test)]
+// the runs are stand-in agents (`worker::tests::stand_in`): shell scripts, so Unix only
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::tickets::github::tests::{board, one_issue, tickets_data};
@@ -275,7 +276,6 @@ mod tests {
 
     /// A run notes itself (the ticket, where it was, its branch and worktree, the agent's process,
     /// which has a process group of its own) while it runs, and removes the note when it ends.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_run_notes_itself() {
         tickets_data();
@@ -302,7 +302,6 @@ mod tests {
     /// board's failed column with a comment that names the branch, gets a history entry, and its
     /// agent is stopped where it's still at work; the note is gone. A ticket someone moved since
     /// stays where it is, and a process that only got the agent's old pid is left alone.
-    #[cfg(unix)]
     #[tokio::test]
     async fn runs_cut_short() {
         tickets_data();

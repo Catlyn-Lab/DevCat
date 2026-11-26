@@ -159,7 +159,10 @@ pub async fn fetch(id: &str, root: &str, rel: &str) -> AppResult<Answer> {
     }
 }
 
-#[cfg(test)]
+// the test host runs the script with the local `sh` on this computer's paths: a Unix one, like
+// the other test-host tests (`claude/sftp.rs`, `agent_ssh.rs`); Windows paths (`C:\…`) aren't
+// `ssh://host/path` folders
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::claude::remote::LOCAL_TEST_HOST;
@@ -200,7 +203,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn host_refuses_links_out_and_into_hidden_folders() {
         let d = site();

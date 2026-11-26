@@ -14,7 +14,8 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
 
 - **To do list that agents keep**: a To do panel in the sidebar shows, per project, what your agents are running,
   what's next, what waits on someone else and what waits on you, with links to PRs, issues and files. Agents keep it
-  current with the new `todo_write` and `todo_list` tools (DevCat Agent and `devcat mcp`), so a restarted session or
+  current with the new `todo_write` and `todo_list` tools (`devcat mcp`; `project_todo_write` and
+  `project_todo_list` in the DevCat Agent), so a restarted session or
   another agent picks the list up. Tick an item done or move it from its menu; a dot on the icon means something
   waits on you.
 - **DevCat Agent: put the files back to before a message**: the agent saves the project's files before it changes

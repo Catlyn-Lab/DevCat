@@ -974,6 +974,6 @@ mod tests {
         };
         assert_eq!(pieces(&e), vec![(Who::ToolCall, "cargo test".to_string())]);
         assert_eq!(terms("a \"b c\" foo-bar a"), vec![vec!["a".to_string()], vec!["b".into(), "c".into()], vec!["foo".into(), "bar".into()]]);
-        assert_eq!(norm_cwd("/a/b/../c/"), "/a/c");
+        assert_eq!(norm_cwd("/a/b/../c/"), if cfg!(windows) { "\\a\\c" } else { "/a/c" });
     }
 }
