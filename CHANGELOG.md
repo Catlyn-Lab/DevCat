@@ -12,45 +12,59 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
 
 ## Unreleased
 
-- **Rename tabs**: double-click a tab, or right-click it → **Rename tab**, to give a chat, terminal or any other tab
+## 0.35.0 - 2026-11-28
+
+- **Rename tabs** (#257): double-click a tab, or right-click it → **Rename tab**, to give a chat, terminal or any other tab
   a name of its own. It stays while the tab's own title changes underneath (a terminal program's title, the chat's
   title); empty it, or **Reset tab name**, to go back.
-- **To do list that agents keep**: a To do panel in the sidebar shows, per project, what your agents are running,
+- **To do list that agents keep** (#251, #252): a To do panel in the sidebar shows, per project, what your agents are running,
   what's next, what waits on someone else and what waits on you, with links to PRs, issues and files. Agents keep it
   current with the new `todo_write` and `todo_list` tools (`devcat mcp`; `project_todo_write` and
   `project_todo_list` in the DevCat Agent), so a restarted session or
   another agent picks the list up. Tick an item done or move it from its menu; a dot on the icon means something
-  waits on you.
-- **Leave a room**: **Leave room** in a room's header, its right-click menu in the sidebar, or Room settings. The
+  waits on you. A pull request an agent reviewed waits on others until it's merged or closed, instead of being done.
+- **Leave a room** (#256): **Leave room** in a room's header, its right-click menu in the sidebar, or Room settings. The
   owner's DevCat takes you off the member list (the others see you go, and nothing new reaches you), then your copy
   is deleted. The owner's DevCat must be open; if it can't be reached, you can delete only your copy instead. The
   owner can remove a room from their DevCat, as before.
-- **DevCat Agent: put the files back to before a message**: the agent saves the project's files before it changes
+- **DevCat Agent: put the files back to before a message** (#237): the agent saves the project's files before it changes
   them (once a turn, and again before a command that deletes or overwrites), in a store of its own that never
   touches the project's `.git`. **Restore files** on one of your messages shows which files would change, then puts
   them back; the files as they were are saved first, so a restore can be undone too, and the agent is told with
   your next message. Not in ghost chats or folders on SSH hosts.
-- **Closing a tab ends everything it started**: closing a terminal or Claude Code tab now also ends what its program
+- **Closing a tab ends everything it started** (#255): closing a terminal or Claude Code tab now also ends what its program
   started (MCP servers, a dev server, a build), instead of leaving them running; so does a program exiting by itself,
   and quitting DevCat. Detached programs (ssh's shared connection, tmux) keep running. A DevCat Agent chat's MCP
   servers end with the chat, and when DevCat quits, with whatever they started.
-- **DevCat Agent: commands that could wreck the computer always ask**: deleting the disk or a system or home folder,
+- **DevCat Agent: commands that could wreck the computer always ask** (#237): deleting the disk or a system or home folder,
   writing to a raw disk, piping a download into a shell, `sudo -S`, fork bombs and shutting down ask every time,
   also in auto-edit and Bypass, and "always allow" doesn't carry over to the next one. The approval says why.
-- **DevCat Agent: search earlier chats**: the agent can look up the folder's earlier chats (and the part of this
+- **DevCat Agent: search earlier chats** (#237): the agent can look up the folder's earlier chats (and the part of this
   one a summary replaced) when you refer to earlier work. Secrets are hidden in what it finds. Only in chats with
   DevCat connections, never in ghost chats.
-- **DevCat Agent: learn from chats** (off by default, per connection): every few turns, and after a long one, the
+- **DevCat Agent: learn from chats** (#237) (off by default, per connection): every few turns, and after a long one, the
   agent looks back over the chat in the background and saves to memory what's worth keeping; the chat shows what
   it saved. It can also save a procedure as a skill (`.agents/skills`), which asks first and shows the text.
-- **DevCat Agent: a fallback connection**: when a connection's provider is down, out of quota or refuses the key,
+- **DevCat Agent: a fallback connection** (#237): when a connection's provider is down, out of quota or refuses the key,
   another DevCat Agent connection you pick takes the step, and the next message tries the first one again.
-- **DevCat Agent: steadier on long work**: a call that keeps returning the same result, or a few calls going round
+- **DevCat Agent: steadier on long work** (#237): a call that keeps returning the same result, or a few calls going round
   in a circle, are stopped with a note instead of spending the turn; a reply stuck repeating itself isn't asked to
   go on. Old long tool output is left out (with where it's saved) before the conversation is summarized. Edits whose
   text differs only in indentation or a level of backslash escaping now go through; `write` won't replace a file
   the agent hasn't read or that changed since. A subfolder's AGENTS.md comes with the agent's first look into it,
   and a helper's answer says how it went and which files it read.
+- **SQLite over SSH** (#233): a SQLite connection has an **SSH** tab: type the database file's path on the server.
+  When the server has `sqlite3` 3.26 or newer, DevCat runs it there, so browsing, queries, the table designer and
+  grid edits happen on the server, which does the locking. Otherwise DevCat opens a read-only copy (checked to be
+  whole) and never writes it back. A mistyped path doesn't create an empty database unless you tick **Create the
+  file if it doesn't exist**.
+- **Move dialogs aside** (#234): drag a dialog (Edit connection and the others) by its title bar to see what's
+  behind it. It opens centred again the next time.
+- **Page review: images on notes** (#249): paste, drop or pick images on a note; they're kept with the review and
+  listed in it by path. **Send to…** in the Finish dialog puts the review into a running agent's prompt, and for an
+  agent on an SSH host the images are copied to the server first.
+- **Page review: Inspect starts off** (#248): clicks on the page use the page until you turn on **Inspect** (or
+  press `I`).
 
 ## 0.34.1 - 2026-11-22
 
