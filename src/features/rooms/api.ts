@@ -117,7 +117,11 @@ export const rooms = {
   /** Waits for the owner's answer (up to 5 minutes). */
   join: (link: string, myName: string) => invoke<string>("room_join", { link, myName }),
   answer: (requestId: string, role: Role | null) => invoke<void>("room_join_answer", { requestId, role }),
+  /** Delete this DevCat's copy without telling anyone. */
   forget: (room: string) => invoke<void>("room_forget", { room }),
+  /** The owner's DevCat takes this one off the list, then the copy here is deleted (up to ~30 s
+   *  when the owner's DevCat can't be reached). */
+  leave: (room: string) => invoke<void>("room_leave", { room }),
   view: (room: string) => invoke<RoomView>("room_view", { room }),
   board: (room: string) => invoke<RoomBoard>("room_board", { room }),
   /** What a copy at `version` (base64url, "" for none) lacks. */

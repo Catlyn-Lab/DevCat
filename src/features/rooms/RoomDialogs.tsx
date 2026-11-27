@@ -2,18 +2,17 @@
 // user's agent in it).
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
-import { AlertTriangle, Copy, FolderOpen, Link2, Trash2, UserMinus } from "lucide-react";
+import { AlertTriangle, Copy, FolderOpen, Link2, LogOut, Trash2, UserMinus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Badge, Button, Checkbox, Dialog, Field, Input, Select } from "../../components/ui";
 import { api, errMsg } from "../../lib/api";
 import type { AiProvider } from "../../lib/types";
 import { useConnections } from "../../store/connections";
-import { useTabs } from "../../store/tabs";
 import { confirmDialog } from "../connections/dialogs";
 import { rooms, type MemberView, type MemoryReach, type Mentions, type Role, type RoomView } from "./api";
 import { GithubSettings } from "./GithubDialogs";
-import { useRooms } from "./store";
+import { leaveRoom } from "./store";
 
 const ROLE: Record<Role, string> = { owner: "Owner", editor: "Editor", viewer: "Reads only", keeper: "Keeper" };
 
@@ -162,7 +161,7 @@ function ProjectLink({ view, setPrefs }: { view: RoomView; setPrefs: (p: Partial
   );
 }
 
-export function SettingsDialog({ open, onClose, room, view, tabId }: { open: boolean; onClose: () => void; room: string; view: RoomView; tabId: string }) {
+export function SettingsDialog({ open, onClose, room, view }: { open: boolean; onClose: () => void; room: string; view: RoomView }) {
   const [name, setName] = useState(view.settings.name);
   const [providers, setProviders] = useState<AiProvider[]>([]);
   const [keeper, setKeeper] = useState("");
@@ -182,20 +181,8 @@ export function SettingsDialog({ open, onClose, room, view, tabId }: { open: boo
   };
   const setPrefs = (p: Partial<RoomView["prefs"]>) => void run(() => rooms.prefs(room, { ...view.prefs, ...p }));
   const chosen = providers.find((p) => p.id === view.prefs.agentProvider);
-  const forget = async () => {
-    const ok = await confirmDialog({
-      title: `Leave ${view.settings.name} on this DevCat?`,
-      message: view.owner ? "You own this room: the others keep their copies, but nobody can let new people in any more." : "Your copy is deleted here. The others keep the room; the owner can invite you again.",
-      confirmLabel: "Leave",
-      danger: true,
-    });
-    if (!ok) return;
-    await run(async () => {
-      await rooms.forget(room);
-      useTabs.getState().close(tabId, true);
-      await useRooms.getState().refresh();
-      onClose();
-    });
+  const leave = async () => {
+    if (await leaveRoom({ id: room, name: view.settings.name, role: view.summary.role, removed: view.summary.removed })) onClose();
   };
   return (
     <Dialog open={open} onClose={onClose} title="Room settings" width={540}>
@@ -271,7 +258,9 @@ export function SettingsDialog({ open, onClose, room, view, tabId }: { open: boo
             Your DevCat's id in rooms <span className="font-mono">{view.me.slice(0, 12)}…</span>{" "}
             <button className="text-accent hover:underline" title="For `devcat keeper --owner <id>`" onClick={() => copy(view.me)}>copy</button>
           </span>
-          <Button variant="danger" onClick={() => void forget()}><Trash2 className="size-3.5" />Leave on this DevCat</Button>
+          <Button variant="danger" onClick={() => void leave()}>
+            {view.owner || view.summary.removed ? <><Trash2 className="size-3.5" />Remove from this DevCat</> : <><LogOut className="size-3.5" />Leave room</>}
+          </Button>
         </div>
       </div>
     </Dialog>

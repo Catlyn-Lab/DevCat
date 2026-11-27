@@ -433,6 +433,7 @@ pub fn run() {
             rooms::room_join,
             rooms::room_join_answer,
             rooms::room_forget,
+            rooms::room_leave,
             rooms::room_view,
             rooms::room_board,
             rooms::room_doc_updates,

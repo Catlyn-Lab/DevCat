@@ -158,6 +158,9 @@ struct Inner {
     pending_tokens: Mutex<HashSet<String>>,
     /// Rooms deleted because this DevCat was removed from them, not yet told to its user.
     gone: Mutex<Vec<Gone>>,
+    /// Rooms this DevCat is leaving (`Node::leave`): taken off the list on its own request, so
+    /// a sync that says so before the copy is deleted isn't news to tell the user.
+    leaving: Mutex<HashSet<String>>,
 }
 
 /// A room this DevCat was removed from, and so deleted.
@@ -216,6 +219,7 @@ impl Node {
             keeper,
             pending_tokens: Mutex::new(HashSet::new()),
             gone: Mutex::new(Vec::new()),
+            leaving: Mutex::new(HashSet::new()),
         });
         let router = Router::builder(endpoint).accept(wire::ALPN, RoomProto(Arc::downgrade(&inner))).accept(iroh_gossip::ALPN, gossip).spawn();
         *inner.router.lock() = Some(router);
@@ -386,6 +390,41 @@ impl Node {
         }
     }
 
+    /// Leave a room: the owner's DevCat takes this one off the member list (a new epoch: nothing
+    /// new reaches it, and the others see it gone), then the copy here is deleted. Needs the
+    /// owner's DevCat to answer; `forget` deletes the copy here without telling anyone.
+    pub async fn leave(&self, room: &str) -> Result<()> {
+        let r = self.room(room)?;
+        if r.is_owner() {
+            return Err("You own this room: nobody can take you off its list. Remove it from this DevCat instead.".into());
+        }
+        let (owner, hints) = {
+            let st = r.state.lock();
+            (st.membership.owner.clone(), st.hints.get(&st.membership.owner).cloned())
+        };
+        self.inner.leaving.lock().insert(room.to_string());
+        let asked = self.ask_to_leave(room, &owner, hints.as_ref()).await;
+        let done = match asked {
+            // already off the list (removed meanwhile) is as good; a sync may have deleted the copy already
+            Ok(Some(Reply::Left)) | Ok(Some(Reply::Denied { removed: true, .. })) => self.forget(room),
+            Ok(Some(Reply::Denied { reason, .. })) => Err(reason),
+            Err(e) => Err(e),
+            // a DevCat from before `Leave` closes without a word
+            Ok(_) => Err("The owner's DevCat didn't take the request: it may be an older DevCat.".into()),
+        };
+        self.inner.leaving.lock().remove(room);
+        done
+    }
+
+    async fn ask_to_leave(&self, room: &str, owner: &str, hints: Option<&Hints>) -> Result<Option<Reply>> {
+        let conn = self.inner.dial(owner, hints).await.map_err(|e| format!("Couldn't reach the owner's DevCat ({e}). It needs to be open to take you off the list."))?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+        write_frame(&mut send, &Hello::Leave { room: room.to_string() }).await.map_err(|e| e.to_string())?;
+        let reply = tokio::time::timeout(ANSWER, read_frame(&mut recv)).await.map_err(|_| "The owner's DevCat didn't answer.".to_string())?.map_err(|e| e.to_string());
+        conn.close(0u32.into(), b"done");
+        reply
+    }
+
     /// Forget a room on this DevCat (the others keep it).
     pub fn forget(&self, room: &str) -> Result<()> {
         let r = self.inner.rooms.lock().remove(room);
@@ -487,6 +526,24 @@ impl Inner {
                 let r = self.rooms.lock().get(&room).cloned();
                 let sealed = r.filter(|r| r.state.lock().membership.member(&peer).is_some_and(|m| m.role.reads())).and_then(|_| self.store.get_blob(&room, &hash));
                 let _ = write_frame(&mut send, &Reply::Blob { sealed: sealed.map(|b| b64(&b)) }).await;
+            }
+            Hello::Leave { room } => {
+                let reply = match self.rooms.lock().get(&room).cloned() {
+                    None => Reply::Denied { reason: "That room isn't on the owner's DevCat any more.".into(), removed: false, membership: None },
+                    Some(r) if !r.is_owner() => Reply::Denied { reason: "Only the owner's DevCat takes people off the list.".into(), removed: false, membership: None },
+                    Some(r) => {
+                        if r.state.lock().membership.member(&peer).is_none() {
+                            Reply::Denied { reason: "You're not in this room any more.".into(), removed: true, membership: Some(r.state.lock().membership.clone()) }
+                        } else {
+                            // they know they're leaving: no sync telling them they were removed
+                            match r.remove(&peer, false) {
+                                Ok(()) => Reply::Left,
+                                Err(e) => Reply::Denied { reason: e, removed: false, membership: None },
+                            }
+                        }
+                    }
+                };
+                let _ = write_frame(&mut send, &reply).await;
             }
             Hello::KeeperPush { room, membership, items } => {
                 let reply = match &self.keeper {
@@ -825,7 +882,9 @@ impl Room {
         if let Err(e) = node.store.delete(&self.id) {
             tracing::warn!("deleting room {}: {e}", self.id);
         }
-        node.gone.lock().push(Gone { id: self.id.clone(), name: self.name() });
+        if !node.leaving.lock().contains(&self.id) {
+            node.gone.lock().push(Gone { id: self.id.clone(), name: self.name() });
+        }
         self.changed(Change::Removed);
     }
 
@@ -1212,6 +1271,12 @@ impl Room {
 
     /// Remove a member (owner only). Starts a new epoch: they can't read anything new.
     pub fn remove_member(self: &Arc<Self>, member: &str) -> Result<()> {
+        self.remove(member, true)
+    }
+
+    /// `remove_member`; `tell_them`: also sync with the removed member, so their DevCat learns it
+    /// at once (not when they leave themselves: they know).
+    fn remove(self: &Arc<Self>, member: &str, tell_them: bool) -> Result<()> {
         if !self.is_owner() {
             return Err("Only the owner can remove members.".into());
         }
@@ -1219,7 +1284,7 @@ impl Room {
             return Err("You own this room; you can't remove yourself.".into());
         }
         let reads = self.state.lock().membership.member(member).map(|m| m.role.reads()).ok_or("Not a member.")?;
-        let everyone: Vec<String> = self.state.lock().membership.members.iter().filter(|m| m.id != self.me && m.role.reads()).map(|m| m.id.clone()).collect();
+        let everyone: Vec<String> = self.state.lock().membership.members.iter().filter(|m| m.id != self.me && m.role.reads() && (tell_them || m.id != member)).map(|m| m.id.clone()).collect();
         self.update_membership(|m| m.members.retain(|x| x.id != member), reads).ok_or("Couldn't update the room.")?;
         self.presence.lock().remove(member);
         // Tell each of them directly (gossip may not reach someone who just arrived): the sync

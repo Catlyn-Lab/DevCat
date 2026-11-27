@@ -6,7 +6,7 @@
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { open as openFile, save as saveFile } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
-import { Brain, CheckSquare, Columns2, Copy, Download, Eye, FilePlus2, FileText, FolderGit2, FolderInput, FolderUp, History, Lightbulb, MessagesSquare, NotebookPen, Pencil, PenTool, Plus, Settings, Sparkles, SquarePen, Trash2, Upload, Users, X } from "lucide-react";
+import { Brain, CheckSquare, Columns2, Copy, Download, Eye, FilePlus2, FileText, FolderGit2, FolderInput, FolderUp, History, Lightbulb, LogOut, MessagesSquare, NotebookPen, Pencil, PenTool, Plus, Settings, Sparkles, SquarePen, Trash2, Upload, Users, X } from "lucide-react";
 import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Badge, Button, Empty, IconButton, Spinner } from "../../components/ui";
@@ -27,7 +27,7 @@ import { PeopleDialog, SettingsDialog, pathText } from "./RoomDialogs";
 import { FileHistoryDialog } from "./FileHistory";
 import { HistoryPanel, SuggestionsPanel, ThreadPanel } from "./RoomPanels";
 import { shareFiles } from "./share";
-import { startRooms, useRooms } from "./store";
+import { leaveRoom, startRooms, useRooms } from "./store";
 import { TasksPanel } from "./TasksPanel";
 
 // the drawing code is large: loaded when a whiteboard opens
@@ -293,6 +293,12 @@ export default function RoomTab({ tab }: { tab: Tab & { type: "room" } }) {
         <div className="ml-auto flex items-center gap-1">
           <Button size="sm" variant="ghost" onClick={() => setPeople(true)}><Users className="size-3.5" />{view.owner ? "People & invites" : "People"}</Button>
           <IconButton title="Room settings" onClick={() => setSettings(true)}><Settings className="size-3.5" /></IconButton>
+          <IconButton
+            title={view.owner || view.summary.removed ? "Remove this room from this DevCat" : "Leave the room"}
+            onClick={() => void leaveRoom({ id: room, name: view.settings.name, role: view.summary.role, removed: view.summary.removed })}
+          >
+            <LogOut className="size-3.5" />
+          </IconButton>
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
@@ -385,7 +391,7 @@ export default function RoomTab({ tab }: { tab: Tab & { type: "room" } }) {
         </div>
       </div>
       <PeopleDialog open={people} onClose={() => setPeople(false)} room={room} view={view} />
-      <SettingsDialog open={settings} onClose={() => setSettings(false)} room={room} view={view} tabId={tab.id} />
+      <SettingsDialog open={settings} onClose={() => setSettings(false)} room={room} view={view} />
       <ShareFromDevCatDialog room={room} open={sharing} onClose={() => setSharing(false)} onShared={setFile} />
       {skill && <AddSkillDialog room={room} folder={skill} files={files} skillText={textOf(`${skill}/SKILL.md`)} onClose={() => setSkill(null)} />}
       {memory && <SaveMemoryDialog room={room} path={memory} text={textOf(memory)} onClose={() => setMemory(null)} />}
