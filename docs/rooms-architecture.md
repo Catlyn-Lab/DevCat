@@ -108,6 +108,12 @@ Allowed        ─► room keys + member list + the document, over that encrypte
   makes the room read-only, so no member can make another's DevCat delete a room by saying so. The owner also
   never pushes document changes to a peer that isn't a reader in its newest list (it syncs once with the member
   it removed, to tell them).
+- **Built:** a member leaves (`Node::leave`): its DevCat asks the owner's over `devcat/room/1` (`Leave`; the
+  connection says who asks, so only a member's own DevCat takes it off the list). The owner's DevCat removes it as
+  above, new epoch and all, without the sync that would tell it so, and answers `Left`; then the copy there is
+  deleted, without the "you were removed" notice (`leaving`). The owner's DevCat must be open: when it can't be
+  reached (or is too old to know `Leave`), the window offers to delete only the copy here (`forget`), which leaves
+  the member on the list until the owner removes them. The owner can't leave its own room, only delete its copy.
 
 ### 4.4 Data
 

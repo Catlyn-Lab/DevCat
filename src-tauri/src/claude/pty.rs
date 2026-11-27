@@ -51,6 +51,8 @@ struct Pty {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// The program's process id: it leads the terminal's session (see `procs`).
+    pid: Option<u32>,
     /// Label of the window that opened the terminal (closed with it).
     owner: Mutex<Option<String>>,
     info: Mutex<PtyInfo>,
@@ -312,6 +314,7 @@ pub(crate) async fn open(
         master: Mutex::new(pair.master),
         writer: Mutex::new(Some(writer)),
         killer: Mutex::new(child.clone_killer()),
+        pid: child.process_id(),
         owner: Mutex::new(None),
         info: Mutex::new(info),
         scrollback: Mutex::new(Vec::new()),
@@ -369,9 +372,19 @@ pub(crate) async fn open(
 
     // exit watcher
     let pid = id.clone();
+    let leader = child.process_id();
     std::thread::spawn(move || {
         let code = child.wait().map(|s| s.exit_code()).ok();
         exited.store(true, std::sync::atomic::Ordering::SeqCst);
+        // What it left behind goes with it (Claude Code's MCP servers after /exit, a job the
+        // shell started): nothing can be typed to them any more, and they'd keep the terminal
+        // open. Found now, while they're still in its session.
+        if let Some(l) = leader {
+            let left = super::procs::of_session(l);
+            if !left.is_empty() {
+                std::thread::spawn(move || super::procs::end(&left, LEFTOVERS_GRACE));
+            }
+        }
         // Flush remaining output first (bounded: background jobs may keep the tty open).
         let deadline = Instant::now() + Duration::from_millis(500);
         while !batcher.is_finished() && Instant::now() < deadline {
@@ -451,13 +464,39 @@ pub fn scrollback(id: &str) -> AppResult<Vec<u8>> {
 }
 
 fn kill(pty: &Pty) {
+    // Windows: the program's tree, while the program is still there to follow it through.
+    #[cfg(windows)]
+    if let Some(pid) = pty.pid {
+        super::procs::kill_tree(pid);
+    }
     // Kill before dropping the writer: dropping it sends EOF, which lets the program exit cleanly first.
     let _ = pty.killer.lock().kill();
     pty.writer.lock().take();
 }
 
+/// The program and everything it started (its session, `procs`): hung up, then SIGTERM, then
+/// SIGKILL for what's still there after `grace`. Found before the program is signalled, while
+/// they're all still in its session. Blocks for up to `grace`.
+fn kill_all(pty: &Pty, grace: Duration) {
+    // Once the program has exited, the exit watcher ends what it left, and its pid may be
+    // someone else's: nothing to signal here.
+    if pty.exited.load(std::sync::atomic::Ordering::SeqCst) {
+        pty.writer.lock().take();
+        return;
+    }
+    let procs = pty.pid.map(super::procs::of_session).unwrap_or_default();
+    kill(pty);
+    super::procs::end(&procs, grace);
+}
+
 /// How long Claude Code gets to exit on its own before it's killed.
 const CLAUDE_EXIT: Duration = Duration::from_secs(3);
+/// How long a closed terminal's processes get to end after SIGTERM, before SIGKILL.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
+/// The same for what a program that exited by itself left running.
+const LEFTOVERS_GRACE: Duration = Duration::from_secs(2);
+/// The same when the app quits (all terminals together; the app waits for it).
+const QUIT_GRACE: Duration = Duration::from_secs(1);
 
 /// Ask Claude Code to exit, as a user would: Ctrl+C clears the prompt or stops a turn, and pressed
 /// again, exits. (Killed instead, its own exit never runs: a full-screen start killed early counts
@@ -482,16 +521,16 @@ fn wait_exits(ptys: &[Arc<Pty>], until: Instant) {
     }
 }
 
-/// End a terminal's program: Claude Code is asked to exit first (in the background: the tab
-/// closes at once), anything else is killed.
+/// End a terminal's program and everything it started (in the background: the tab closes at
+/// once). Claude Code is asked to exit first, so it ends its MCP servers itself and isn't counted
+/// as crashed; anything still there afterwards is ended.
 fn end(pty: Arc<Pty>) {
-    if !pty.info.lock().agent {
-        return kill(&pty);
-    }
     std::thread::spawn(move || {
-        ask_to_exit(&pty);
-        wait_exits(std::slice::from_ref(&pty), Instant::now() + CLAUDE_EXIT);
-        kill(&pty);
+        if pty.info.lock().agent {
+            ask_to_exit(&pty);
+            wait_exits(std::slice::from_ref(&pty), Instant::now() + CLAUDE_EXIT);
+        }
+        kill_all(&pty, CLOSE_GRACE);
     });
 }
 
@@ -517,7 +556,7 @@ pub fn close_owned_by(label: &str) {
 }
 
 /// End every terminal (app exit): the Claude Code ones are asked to exit, all together, and get
-/// the same time to before everything is killed.
+/// the same time to before everything is killed, with what every terminal started.
 pub fn shutdown_all() {
     let all: Vec<Arc<Pty>> = PTYS.lock().drain().map(|(_, p)| p).collect();
     let claude: Vec<Arc<Pty>> = all.iter().filter(|p| p.info.lock().agent).cloned().collect();
@@ -526,9 +565,15 @@ pub fn shutdown_all() {
         let _ = a.join();
     }
     wait_exits(&claude, Instant::now() + CLAUDE_EXIT);
-    for p in all {
-        kill(&p);
+    // One wait for all of them: the app is quitting. Also the sessions of programs that just
+    // exited: their exit watchers' SIGKILL would come after the app is gone.
+    let procs: Vec<_> = all.iter().filter_map(|p| p.pid).flat_map(super::procs::of_session).collect();
+    for p in &all {
+        if !p.exited.load(std::sync::atomic::Ordering::SeqCst) {
+            kill(p);
+        }
     }
+    super::procs::end(&procs, QUIT_GRACE);
 }
 
 #[cfg(all(test, unix))]
@@ -625,6 +670,51 @@ mod tests {
         let (out, code) = collect_until_exit(&mut rx).await;
         println!("{out:?} {code}");
         assert!(out.contains("Claude Code") && code == 0);
+    }
+
+    /// Waits for "pid=<n>" in the terminal's output.
+    async fn helper_pid(rx: &mut tokio::sync::mpsc::UnboundedReceiver<(&'static str, serde_json::Value)>) -> String {
+        let mut seen = String::new();
+        loop {
+            if let Some(p) = seen.split("pid=").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).filter(|p| !p.is_empty() && seen.contains(&format!("pid={p};"))) {
+                return p.to_string();
+            }
+            let (e, v) = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("timeout").expect("closed");
+            if e == "pty-output" {
+                seen.push_str(&String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().unwrap()).unwrap()));
+            }
+        }
+    }
+
+    fn gone_soon(pid: &str) -> bool {
+        let alive = || std::process::Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        let until = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        !alive()
+    }
+
+    #[tokio::test]
+    async fn closing_ends_what_the_program_started() {
+        let (sink, mut rx) = channel_sink();
+        // a helper that ignores the hangup and SIGTERM, like a server that doesn't notice
+        let script = "sh -c 'trap \"\" HUP TERM; exec sleep 300' & echo \"pid=$!;\"; wait";
+        let id = open(sink, "/tmp", Some("sh".into()), vec!["-c".into(), script.into()], vec![], 80, 24, "desktop").await.unwrap();
+        let helper = helper_pid(&mut rx).await;
+        pty_close(id).await.unwrap();
+        assert!(gone_soon(&helper), "helper {helper} outlived its closed terminal");
+    }
+
+    #[tokio::test]
+    async fn an_exited_program_leaves_nothing_running() {
+        let (sink, mut rx) = channel_sink();
+        // the program starts a helper and exits without it (Claude Code's MCP server after /exit);
+        // the helper ignores the hangup the terminal gives it then
+        let script = "sh -c 'trap \"\" HUP; exec sleep 300' & echo \"pid=$!;\"; sleep 0.3; exit 0";
+        open(sink, "/tmp", Some("sh".into()), vec!["-c".into(), script.into()], vec![], 80, 24, "desktop").await.unwrap();
+        let helper = helper_pid(&mut rx).await;
+        assert!(gone_soon(&helper), "helper {helper} outlived the program that started it");
     }
 
     #[tokio::test]

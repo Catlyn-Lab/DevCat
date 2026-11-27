@@ -238,3 +238,47 @@ async fn keeper_bridges_members_who_are_never_online_together() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_leaves_and_the_owner_takes_them_off_the_list() {
+    let (da, db, dc) = (tmp("a5"), tmp("b5"), tmp("c5"));
+    let (a, ha) = start(&da, false).await;
+    let (b, hb) = start(&db, false).await;
+    let (c, _hc) = start(&dc, false).await;
+    let room = a.create("Design review", "Arif").unwrap();
+    let ra = a.room(&room).unwrap();
+    *ha.answer.lock() = Some(Role::Editor);
+    b.join(&a.invite(&room, Role::Editor).unwrap(), "Akbar").await.unwrap();
+    c.join(&a.invite(&room, Role::Viewer).unwrap(), "Budi").await.unwrap();
+    let rc = c.room(&room).unwrap();
+    until("C sees three members", 20, || rc.membership().members.len() == 3).await;
+
+    // The owner can't leave its own room this way.
+    assert!(a.leave(&room).await.unwrap_err().contains("You own this room"));
+
+    // B leaves: off the owner's list in a new epoch, its copy gone, and no "you were removed".
+    b.leave(&room).await.unwrap();
+    assert!(b.room(&room).is_err());
+    assert!(!db.join(&room).exists(), "nothing left on B's disk");
+    assert!(b.take_gone().is_empty(), "leaving isn't being removed");
+    assert!(!*hb.removed.lock() || b.take_gone().is_empty());
+    assert!(ra.membership().member(&b.id()).is_none());
+    assert_eq!(ra.membership().epoch, 1, "a new key: B reads nothing new");
+    until("C sees B gone", 30, || rc.membership().member(&b.id()).is_none() && rc.membership().epoch == 1).await;
+    assert!(b.leave(&room).await.is_err(), "not in it any more");
+
+    // The owner away: leaving says so and keeps the copy (the window offers to delete it anyway).
+    a.shutdown().await;
+    let err = c.leave(&room).await.unwrap_err();
+    assert!(err.contains("Couldn't reach the owner") || err.contains("didn't answer"), "{err}");
+    assert!(c.room(&room).is_ok(), "still there");
+    c.forget(&room).unwrap();
+    assert!(c.room(&room).is_err());
+
+    for n in [b, c] {
+        n.shutdown().await;
+    }
+    for d in [da, db, dc] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

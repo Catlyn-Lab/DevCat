@@ -1,13 +1,14 @@
 // Rooms: the sidebar list, a new room, joining one with an invite link, and the
 // owner's answer to someone asking to join.
 import clsx from "clsx";
-import { DoorOpen, Plus, Users } from "lucide-react";
+import { DoorOpen, LogOut, Plus, Trash2, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Badge, Button, Dialog, Empty, ErrorBox, Field, Input } from "../../components/ui";
 import { errMsg } from "../../lib/api";
-import { rooms, type JoinRequest } from "./api";
-import { myName, openRoom, setMyName, useRooms } from "./store";
+import { useContextMenu, type MenuItem } from "../connections/ContextMenu";
+import { rooms, type JoinRequest, type RoomSummary } from "./api";
+import { leaveRoom, myName, openRoom, setMyName, useRooms } from "./store";
 
 type Mode = "list" | "new" | "join";
 
@@ -166,6 +167,14 @@ export function RoomsPanel() {
   const list = useRooms((s) => s.list);
   const agents = useRooms((s) => s.agents);
   const mentions = useRooms((s) => s.mentions);
+  const menu = useContextMenu();
+  const roomMenu = (r: RoomSummary): MenuItem[] => [
+    { label: "Open", icon: <Users className="size-3.5" />, onClick: () => openRoom(r) },
+    "separator",
+    r.role === "owner" || r.removed
+      ? { label: "Remove from this DevCat…", icon: <Trash2 className="size-3.5" />, danger: true, onClick: () => void leaveRoom(r) }
+      : { label: "Leave room…", icon: <LogOut className="size-3.5" />, danger: true, onClick: () => void leaveRoom(r) },
+  ];
   useEffect(() => { void useRooms.getState().refresh(false).catch(() => {}); }, []);
   return (
     <div className="flex h-full flex-col">
@@ -180,7 +189,7 @@ export function RoomsPanel() {
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto py-0.5">
           {list.map((r) => (
-            <button key={r.id} onClick={() => openRoom(r)} className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-hover">
+            <button key={r.id} onClick={() => openRoom(r)} onContextMenu={(e) => menu.show(e, roomMenu(r))} className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-hover">
               <Users className={clsx("size-3.5 shrink-0", r.removed ? "text-faint" : "text-accent")} />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-[13px]">{r.name}</span>
@@ -193,6 +202,7 @@ export function RoomsPanel() {
           ))}
         </div>
       )}
+      {menu.element}
     </div>
   );
 }

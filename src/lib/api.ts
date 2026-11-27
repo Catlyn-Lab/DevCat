@@ -61,6 +61,13 @@ export const api = {
   reviewFinish: (id: string, styles: boolean, rev: number) => invoke<Note>("review_finish", { id, styles, rev }),
   reviewClose: (id: string) => invoke<void>("review_close", { id }),
   reviewClearData: () => invoke<void>("review_clear_data"),
+  /** Adds an image (base64) to a note; only PNG, JPEG, GIF and WebP are taken. */
+  reviewImageAdd: (id: string, n: number, data: string) => invoke<ReviewDoc>("review_image_add", { id, n, data }),
+  reviewImageRemove: (id: string, n: number, name: string) => invoke<ReviewDoc>("review_image_remove", { id, n, name }),
+  /** One of the review's images as a data: URL. */
+  reviewImage: (id: string, name: string) => invoke<string>("review_image", { id, name }),
+  /** The review's text for a terminal in `cwd`: on an SSH host its images are copied there first. */
+  reviewTextFor: (cwd: string, text: string) => invoke<string>("review_text_for", { cwd, text }),
 
   // projects
   listProjects: () => invoke<Project[]>("list_projects"),

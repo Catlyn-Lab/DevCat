@@ -79,6 +79,8 @@ export interface ReviewNote {
   source: string | null;
   style: string | null;
   comment: string;
+  /** Image files added to the note in DevCat, by name (left out when none). */
+  images?: string[];
 }
 
 export type ReviewTarget = { kind: "url"; origin: string } | { kind: "file"; root: string; rel: string };

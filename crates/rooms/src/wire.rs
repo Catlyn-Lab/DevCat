@@ -6,6 +6,7 @@
 //! - `Sync`: catch up both ways; the callee sends what the caller lacks, the caller then sends
 //!   [`Push`] with what the callee lacks. Also hands out room keys to members that miss one.
 //! - `Blob`: a shared binary file, still encrypted with the room key.
+//! - `Leave`: a member asks the owner to take it off the list, answered `Left` (or `Denied`).
 //! - `Keeper*`: store and fetch encrypted changes on a blind keeper.
 //!
 //! **Gossip** (iroh-gossip, topic derived from the room key): [`Envelope`]s, each a [`Gossip`]
@@ -30,6 +31,8 @@ pub enum Hello {
     Blob { room: String, hash: String },
     KeeperPush { room: String, membership: Membership, items: Vec<String> },
     KeeperFetch { room: String, membership: Membership, after: u64 },
+    /// The caller leaves the room: only its own DevCat can ask (the connection says who it is).
+    Leave { room: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +57,8 @@ pub enum Reply {
     Kept { last: u64 },
     /// Keeper: items after the asked index (sealed, as pushed), and the last index.
     Items { items: Vec<(u64, String)>, last: u64 },
+    /// Leave: the owner took the caller off the list.
+    Left,
 }
 
 /// The caller's half of a sync.

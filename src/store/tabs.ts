@@ -24,6 +24,8 @@ interface TabsState extends Panes {
   /** Show a tab in its pane; unless `focus` is false that pane gets the focus too. */
   activate: (id: string, focus?: boolean) => void;
   update: (id: string, patch: Partial<Tab>) => void;
+  /** Give a tab a name of its own (shown instead of its title); empty or null: back to its title. */
+  rename: (id: string, name: string | null) => void;
   /** Move a tab in front of `beforeId` (null: to the end), in the tab order. */
   move: (id: string, beforeId: string | null) => void;
   /** Move a tab into `pane`, in front of `beforeId` (null: after that pane's last tab). */
@@ -33,6 +35,9 @@ interface TabsState extends Panes {
   focusPane: (pane: string) => void;
   setHidden: (ids: string[]) => void;
 }
+
+/** Longest name a tab can be given. */
+const MAX_TAB_NAME = 80;
 
 let seq = 0;
 const newPane = () => `pane-${++seq}`;
@@ -112,6 +117,16 @@ export const useTabs = create<TabsState>((set, get) => ({
   activate: (id, focus = true) => set((s) => withPanes(activateTab(panesOf(s), id, focus))),
   update: (id, patch) =>
     set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? ({ ...t, ...patch } as Tab) : t)) })),
+  rename: (id, name) => {
+    const clean = (name ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_TAB_NAME);
+    set((s) => ({
+      tabs: s.tabs.map((t) => {
+        if (t.id !== id) return t;
+        const { customTitle: _old, ...rest } = t;
+        return (clean && clean !== t.title ? { ...rest, customTitle: clean } : rest) as Tab;
+      }),
+    }));
+  },
   move: (id, beforeId) =>
     set((s) => {
       const tab = s.tabs.find((t) => t.id === id);

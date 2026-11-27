@@ -25,6 +25,11 @@ pub fn set_data_dir(dir: PathBuf) {
     let _ = DATA_DIR.set(dir);
 }
 
+/// `<data>/review-images`, where notes' images are kept.
+pub fn images_root() -> Option<PathBuf> {
+    DATA_DIR.get().map(|d| super::images::root(d))
+}
+
 /// Where Windows / Linux keep the review browser data.
 #[cfg(not(target_os = "macos"))]
 pub fn profile_dir() -> Option<PathBuf> {
