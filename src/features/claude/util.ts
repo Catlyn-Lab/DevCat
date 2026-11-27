@@ -5,6 +5,21 @@ import { basename } from "./open";
 
 export { basename };
 
+/** A context this large is worth a look: every step reads all of it again. */
+export const LARGE_CONTEXT = 200_000;
+
+/** A token count as people say it: 950, 12K, 312K, 1.2M. */
+export function fmtTokens(n: number): string {
+  if (n < 1000) return String(Math.round(n));
+  if (n < 999_500) return `${Math.round(n / 1000)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** What a session's context size means, for a tooltip. */
+export function contextHint(tokens: number): string {
+  return `Context: about ${tokens.toLocaleString("en-US")} tokens. Claude reads all of it again with every step, so each step of a long session costs more than the same step in a new one.`;
+}
+
 const isAbs = (p: string) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
 
 export function resolvePath(cwd: string, p: string): string {

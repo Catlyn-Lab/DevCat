@@ -17,6 +17,18 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
   To do lists**, or **Turn on** in the empty panel; one switch for every project). The lists already written stay. Keeping the list costs your agents
   tokens, so while it is off they get no To do tools and DevCat tells them nothing about it; they get the tools from
   their next session after you turn it on. `todo_write` now answers with what changed instead of the whole list.
+- **Claude tab: how large the session's context is** (#259): next to the session id, the tab shows how many tokens
+  the conversation holds (`312K context`), in the warning color from 200K. Claude reads all of it again with every
+  step, so a long session costs more per step than a new one; **New session** starts small again. The Sessions list
+  shows it for sessions of 100K and more, so you see what resuming one costs.
+- **Shorter answers from DevCat's tools, so agents spend fewer tokens** (#259): a long `db_query` answer stops at a
+  row and says how many rows it showed; `db_schema` of a large database lists the tables' names and asks for one
+  table; `k8s_logs` and `docker_logs` keep the newest lines of a long log, and take `contains` to return only the
+  lines with a text and `skip` to read further back; `k8s_get` leaves out the copy of the last applied manifest; `k8s_overview` shows the 15 newest
+  warnings as one line each.
+- **Delegating to other models: large jobs only** (#259): with models allowed for `agent_delegate`, agents were told
+  to delegate by default, even small work. They are now told to hand over large mechanical code work (a module or
+  test suite of more than about 150 lines, the same edit across many files, boilerplate) and do the rest themselves.
 
 ## 0.35.0 - 2026-11-28
 

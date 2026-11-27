@@ -69,6 +69,10 @@ pub struct SessionMeta {
     pub message_count: usize,
     pub git_branch: Option<String>,
     pub cost_usd: Option<f64>,
+    /// Tokens the session's last request sent to the model: what the conversation holds now, and
+    /// what each further step reads again (`sessions::context_tokens`). None when not known.
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

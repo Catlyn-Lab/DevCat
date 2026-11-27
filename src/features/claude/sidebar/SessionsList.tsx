@@ -1,7 +1,7 @@
 // Past Claude Code sessions for the workspace folder (from ~/.claude/projects), newest first.
 import { homeDir, join } from "@tauri-apps/api/path";
 import clsx from "clsx";
-import { AlertTriangle, Copy, FileText, GitBranch, MessageSquare, Pencil, SquareArrowOutUpRight, X } from "lucide-react";
+import { AlertTriangle, Copy, FileText, Gauge, GitBranch, MessageSquare, Pencil, SquareArrowOutUpRight, X } from "lucide-react";
 import { memo, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { toast } from "sonner";
 import { Spinner } from "../../../components/ui";
@@ -13,6 +13,7 @@ import { useContextMenu, type MenuItem } from "../../connections/ContextMenu";
 import { copyText, relTime, revealPath } from "../../files/format";
 import { chatTabTitle, claudeTabKey, openClaudeWorkspace } from "../open";
 import { useClaude } from "../store";
+import { contextHint, fmtTokens, LARGE_CONTEXT } from "../util";
 
 /** ~/.claude/projects/<cwd with every non-alphanumeric char replaced by "-">/<id>.jsonl */
 async function transcriptPath(cwd: string, id: string): Promise<string> {
@@ -159,6 +160,8 @@ const SessionRow = memo(function SessionRow({ s, now, active, onOpen, onMenu }: 
   onMenu: (e: MouseEvent, s: SessionMeta) => void;
 }) {
   const cost = fmtCost(s.costUsd);
+  // only where it matters: resuming a session with a large context costs that much on every step
+  const context = s.contextTokens != null && s.contextTokens >= LARGE_CONTEXT / 2 ? s.contextTokens : null;
   const title = s.title.trim() || s.firstPrompt?.trim() || "(untitled session)";
   return (
     <div
@@ -179,6 +182,9 @@ const SessionRow = memo(function SessionRow({ s, now, active, onOpen, onMenu }: 
         <span className="inline-flex shrink-0 items-center gap-0.5"><MessageSquare className="size-2.5" />{s.messageCount}</span>
         {s.gitBranch && (
           <span className="inline-flex min-w-0 items-center gap-0.5 truncate"><GitBranch className="size-2.5 shrink-0" /><span className="truncate">{s.gitBranch}</span></span>
+        )}
+        {context != null && (
+          <span className={clsx("inline-flex shrink-0 items-center gap-0.5 tabular-nums", context >= LARGE_CONTEXT && "text-warn")} title={contextHint(context)}><Gauge className="size-2.5" />{fmtTokens(context)}</span>
         )}
         {cost && <span className="ml-auto shrink-0 font-mono">{cost}</span>}
       </div>

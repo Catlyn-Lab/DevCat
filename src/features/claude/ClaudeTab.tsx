@@ -32,7 +32,8 @@ import {
 } from "./store";
 import { setTabVisible, useTabActivity } from "./activity";
 import { TerminalPane } from "./TerminalPane";
-import { basename, modelOptions, PERMISSION_MODES } from "./util";
+import { basename, contextHint, fmtTokens, LARGE_CONTEXT, modelOptions, PERMISSION_MODES } from "./util";
+import { api } from "../../lib/api";
 import { isRemote } from "../../lib/remotePath";
 import AgentChat from "../agent/AgentChat";
 import TraceView from "../agent/TraceView";
@@ -242,6 +243,45 @@ function SessionChip({ tabId }: { tabId: string }) {
   );
 }
 
+const CONTEXT_REFRESH_MS = 15_000;
+
+/** How much the session's context holds, next to the session id: Claude reads all of it again with
+ *  every step, so a session that grew large costs more per step than a new one. Asked while the tab
+ *  shows and when Claude stops working; the backend reads only the end of the transcript.
+ *  The tab's Claude may have moved on to another session (/clear, /resume) that the tab doesn't know
+ *  yet: the chip follows it by the folder's newest session, but only while this is the folder's one
+ *  Claude tab. With two, the newest session may be the other tab's, so each shows its own. */
+function ContextChip({ tabId, cwd, visible }: { tabId: string; cwd: string; visible: boolean }) {
+  const sid = useClaude((s) => s.tabs[tabId]?.sessionId ?? null);
+  const working = useTabActivity(tabId).working;
+  const [tokens, setTokens] = useState<number | null>(null);
+  useEffect(() => {
+    if (!visible || isRemote(cwd)) return;
+    let gone = false;
+    const read = () => {
+      const tabs = useClaude.getState().tabs;
+      const launchedAt = tabs[tabId]?.launchedAt;
+      const others = Object.entries(tabs).filter(([id, t]) => id !== tabId && t.isClaude);
+      const alone = !others.some(([, t]) => t.cwd === cwd);
+      const taken = others.flatMap(([, t]) => (t.sessionId ? [t.sessionId] : []));
+      void api.claudeContext(cwd, sid, alone && launchedAt ? launchedAt - 2000 : null, taken).then((n) => { if (!gone) setTokens(n ?? null); }).catch(() => {});
+    };
+    read();
+    const timer = window.setInterval(read, CONTEXT_REFRESH_MS);
+    return () => { gone = true; window.clearInterval(timer); };
+  }, [tabId, cwd, sid, visible, working]);
+  if (tokens == null) return null;
+  const large = tokens >= LARGE_CONTEXT;
+  return (
+    <span
+      className={clsx("shrink-0 text-[10px] whitespace-nowrap tabular-nums", large ? "text-warn" : "text-faint @max-6xl:hidden")}
+      title={`${contextHint(tokens)}${large ? " New session starts small again." : ""}`}
+    >
+      {fmtTokens(tokens)} context
+    </span>
+  );
+}
+
 function ChatPane({ tabId, cwd, visible, focus, provider }: { tabId: string; cwd: string; visible: boolean; focus: boolean; provider: AiProvider }) {
   const isClaude = provider.kind === "claude";
   const startSeq = useClaude((s) => s.tabs[tabId]?.startSeq ?? 0);
@@ -410,6 +450,7 @@ export default function ClaudeTab({ tab }: { tab: ClaudeTabT }) {
         <div className="flex-1" />
         {(isAgent ? agentBusy : activity.working) && <span className="working-text shrink-0 text-[11px] font-medium whitespace-nowrap" title={`${agent} is working`}>working</span>}
         {!isAgent && <span className={clsx("size-1.5 shrink-0 rounded-full", activity.working ? "bg-accent" : running ? "bg-ok" : "bg-faint")} title={activity.working ? `${agent} is working` : running ? `${agent} is running` : `${agent} is not running`} />}
+        {isClaude && <ContextChip tabId={tabId} cwd={tab.cwd} visible={active} />}
         {(isClaude || isCursor) && <SessionChip tabId={tabId} />}
         {isClaude && <LaunchOptions tabId={tabId} onBypass={() => setConfirmBypass(true)} />}
         {isCursor && <CursorLaunchOptions tabId={tabId} onForce={() => setConfirmForce(true)} />}

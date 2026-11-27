@@ -182,6 +182,10 @@ export const api = {
   claudeProjects: () => invoke<ClaudeProject[]>("claude_projects"),
   claudeSessions: (cwd: string) => invoke<SessionMeta[]>("claude_sessions", { cwd }),
   claudeTranscript: (cwd: string, sessionId: string) => invoke<unknown[]>("claude_transcript", { cwd, sessionId }),
+  /** Tokens the context of a tab's session holds now (null: not known). `sinceMs` and `exclude` find the session
+   *  its Claude moved on to (/clear, /resume): the folder's newest since the launch that no other tab is on. */
+  claudeContext: (cwd: string, sessionId: string | null, sinceMs: number | null, exclude: string[]) =>
+    invoke<number | null>("claude_context", { cwd, sessionId, sinceMs, exclude }),
   /** Name a Claude Code session as /rename does (empty: back to Claude's own title). Returns the title shown now. */
   claudeRename: (cwd: string, sessionId: string, title: string) => invoke<string>("claude_rename", { cwd, sessionId, title }),
   fsList: (dir: string, showIgnored = false) => invoke<FileEntry[]>("fs_list", { dir, showIgnored }),

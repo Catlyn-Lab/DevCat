@@ -548,6 +548,8 @@ export interface ClaudeProject { cwd: string; sessionCount: number; lastActive?:
 export interface SessionMeta {
   id: string; title: string; firstPrompt?: string | null; lastPrompt?: string | null;
   createdAt?: string | null; updatedAt?: string | null; messageCount: number; gitBranch?: string | null; costUsd?: number | null;
+  /** Tokens the session's context holds: what each further step reads again. */
+  contextTokens?: number | null;
 }
 /** Raw stream-json object from the CLI (system / assistant / user / stream_event / result / control_*). */
 export type ClaudeMsg = { type: string; subtype?: string; [k: string]: unknown };

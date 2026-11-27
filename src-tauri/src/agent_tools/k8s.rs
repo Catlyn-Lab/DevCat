@@ -86,7 +86,7 @@ impl Tool for K8sOverview {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "k8s_overview".into(),
-            description: "A DevCat cluster connection at a glance: Kubernetes version, nodes ready, pods by phase, restarts, deployments ready and capacity. With `metrics` = pods or nodes: CPU and memory use from metrics-server (pods of `namespace`, or all).".into(),
+            description: "A DevCat cluster connection at a glance: Kubernetes version, nodes ready, pods by phase, restarts, deployments ready, capacity and the newest warning events, one line each. With `metrics` = pods or nodes: CPU and memory use from metrics-server (pods of `namespace`, or all).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -119,10 +119,46 @@ impl Tool for K8sOverview {
             };
         }
         match kube_infra::k8s_cluster_overview(St::get(), c.id.clone()).await {
-            Ok(o) => ToolOutput::ok(serde_json::to_string_pretty(&o).unwrap_or_default()),
+            Ok(o) => {
+                let mut v = serde_json::to_value(&o).unwrap_or_default();
+                brief_warnings(&mut v);
+                ToolOutput::ok(pretty(&v))
+            }
             Err(e) => ToolOutput::err(connect_error(&self.0, &c, &e.to_string())),
         }
     }
+}
+
+/// Warning events an overview shows.
+const WARNINGS_SHOWN: usize = 15;
+
+/// The overview's warning events (the app's dashboard gets up to 100 whole Event objects, which
+/// were most of this tool's answer) as one line each, the newest [`WARNINGS_SHOWN`], and how many
+/// more there are.
+fn brief_warnings(overview: &mut Value) {
+    let Some(all) = overview.get("warnings").and_then(Value::as_array).cloned() else { return };
+    overview["warnings"] = all.iter().take(WARNINGS_SHOWN).map(|e| Value::String(warning_line(e))).collect();
+    if all.len() > WARNINGS_SHOWN {
+        overview["warningsNotShown"] = json!(format!("{} older ones: `k8s_get` with kind events lists a namespace's, `k8s_events` one object's", all.len() - WARNINGS_SHOWN));
+    }
+}
+
+/// One warning event: when, what it is about, the reason and the start of the message (whichever
+/// of them the event has).
+fn warning_line(e: &Value) -> String {
+    let about = &e["involvedObject"];
+    let s = |v: &Value| v.as_str().unwrap_or_default().trim().to_string();
+    let when = [&e["lastTimestamp"], &e["eventTime"], &e["metadata"]["creationTimestamp"]].into_iter().find_map(Value::as_str).unwrap_or_default().to_string();
+    let name = match (s(&about["namespace"]), s(&about["name"])) {
+        (ns, name) if !ns.is_empty() && !name.is_empty() => format!("{ns}/{name}"),
+        (ns, name) => format!("{ns}{name}"),
+    };
+    let object = [s(&about["kind"]), name].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ");
+    let message: String = s(&e["message"]).split_whitespace().collect::<Vec<_>>().join(" ");
+    let message = if message.chars().count() > 240 { format!("{}…", message.chars().take(240).collect::<String>()) } else { message };
+    let times = e["count"].as_u64().filter(|n| *n > 1).map(|n| format!(" (x{n})")).unwrap_or_default();
+    let what = [s(&e["reason"]), message].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(": ");
+    format!("{}{times}", [when, object, what].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  "))
 }
 
 // ---------- k8s_helm
@@ -330,5 +366,27 @@ impl Tool for K8sApply {
             Ok(out) => ToolOutput::ok(out),
             Err(e) => ToolOutput::err(connect_error(&self.0, &c, &e.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_overviews_warnings_are_one_line_each() {
+        let event = |n: usize| json!({ "involvedObject": { "kind": "Pod", "namespace": "shop", "name": format!("api-{n}") }, "reason": "BackOff", "message": "Back-off restarting\n  failed container", "count": n, "lastTimestamp": "2026-11-28T00:00:00Z", "metadata": { "name": "e", "managedFields": [] } });
+        let mut o = json!({ "version": "v1.31", "warnings": (1..=40).map(event).collect::<Vec<_>>() });
+        brief_warnings(&mut o);
+        let lines = o["warnings"].as_array().unwrap();
+        assert_eq!(lines.len(), WARNINGS_SHOWN);
+        assert_eq!(lines[0], "2026-11-28T00:00:00Z  Pod shop/api-1  BackOff: Back-off restarting failed container");
+        assert_eq!(lines[1], "2026-11-28T00:00:00Z  Pod shop/api-2  BackOff: Back-off restarting failed container (x2)");
+        assert!(o["warningsNotShown"].as_str().unwrap().starts_with("25 older ones"), "{o}");
+        assert_eq!(warning_line(&json!({ "message": "only this", "involvedObject": { "name": "node-1" } })), "node-1  only this");
+        assert_eq!(warning_line(&json!({})), "");
+        let mut few = json!({ "warnings": [event(1)] });
+        brief_warnings(&mut few);
+        assert!(few.get("warningsNotShown").is_none() && few["warnings"].as_array().unwrap().len() == 1);
     }
 }
