@@ -223,7 +223,64 @@ pub(super) fn parse_meta(path: &Path) -> Option<SessionMeta> {
     let md = path.metadata().ok();
     let created = md.as_ref().and_then(|m| m.created().ok()).map(rfc3339);
     let updated = md.as_ref().and_then(|m| m.modified().ok()).map(rfc3339);
-    meta_from_lines(id, read_lines(path).ok()?, None, created, updated)
+    let mut meta = meta_from_lines(id, read_lines(path).ok()?, None, created, updated)?;
+    meta.context_tokens = context_tokens(path);
+    Some(meta)
+}
+
+// ---------------------------------------------------------------- context size
+
+/// How far back from a transcript's end its last request is looked for.
+const CONTEXT_TAIL: u64 = 4 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct UsageLine {
+    message: Option<UsageMessage>,
+}
+
+#[derive(serde::Deserialize)]
+struct UsageMessage {
+    usage: Option<Usage>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Usage {
+    input_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+}
+
+/// The tokens the last request among `lines` sent to the model (read new, read from the cache and
+/// written to it): how much the conversation holds, which is what every further step reads again.
+/// From the last assistant line of the session itself (not a sub-agent's) that counted any; None
+/// when there is none.
+fn context_of<S: AsRef<str>>(lines: impl DoubleEndedIterator<Item = S>) -> Option<u64> {
+    lines.rev().find_map(|raw| {
+        let raw = raw.as_ref();
+        if !raw.contains("\"usage\"") {
+            return None;
+        }
+        let l: Line = serde_json::from_str(raw).ok()?;
+        if l.kind.as_deref() != Some("assistant") || l.is_sidechain {
+            return None;
+        }
+        let u = serde_json::from_str::<UsageLine>(raw).ok()?.message?.usage?;
+        Some(u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens).filter(|n| *n > 0)
+    })
+}
+
+/// [`context_of`] for a transcript file, from its last [`CONTEXT_TAIL`] bytes: a long session's file
+/// runs to hundreds of megabytes, and this is asked again while the session works. A read that
+/// starts inside a line gets a first piece that isn't JSON, which is passed by.
+pub(super) fn context_tokens(path: &Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(CONTEXT_TAIL))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    context_of(String::from_utf8_lossy(&buf).lines())
 }
 
 /// `parse_meta` over transcript lines. `count`: the number of messages when known otherwise (only
@@ -295,6 +352,8 @@ fn meta_from_lines(
         message_count: count,
         git_branch: branch,
         cost_usd: cost,
+        // from the file's end (`parse_meta`); a host's transcript is read in part
+        context_tokens: None,
     })
 }
 
@@ -459,6 +518,38 @@ pub async fn claude_transcript(cwd: String, session_id: String) -> AppResult<Vec
     .await?
 }
 
+/// The transcript a tab's Claude is on now: the folder's newest one written since the tab started
+/// it (`since`; it may have moved on with /clear or /resume) that no other tab is on (`exclude`),
+/// else the one it was started with. By the files' times only, so it costs nothing to ask often.
+fn current_transcript(root: &Path, cwd: &str, session_id: Option<&str>, since: Option<SystemTime>, exclude: &[String]) -> Option<PathBuf> {
+    let newest = since.and_then(|since| {
+        project_dirs_for(root, cwd)
+            .iter()
+            .flat_map(|d| session_files(d))
+            .filter(|p| p.file_stem().is_some_and(|id| !exclude.iter().any(|x| *x == id.to_string_lossy())))
+            .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+            .filter(|(at, _)| *at >= since)
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, p)| p)
+    });
+    newest.or_else(|| session_id.filter(|id| valid_session_id(id)).and_then(|id| find_session_file(root, cwd, id)))
+}
+
+/// How much the context of a tab's session holds now, in tokens (the tab's chip): of
+/// [`current_transcript`] for the tab's session, launch time (`since_ms`, Unix milliseconds) and
+/// the other tabs' sessions. None when it isn't known: nothing sent yet, or a folder on an SSH host.
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn claude_context(cwd: String, session_id: Option<String>, since_ms: Option<u64>, exclude: Option<Vec<String>>) -> AppResult<Option<u64>> {
+    if super::remote::Target::parse(&cwd).is_some() {
+        return Ok(None);
+    }
+    blocking(move || {
+        let since = since_ms.map(|ms| SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+        current_transcript(&projects_root(), &cwd, session_id.as_deref(), since, &exclude.unwrap_or_default()).and_then(|p| context_tokens(&p))
+    })
+    .await
+}
+
 /// Name a session as Claude Code's `/rename` does: a `custom-title` line at the end of its
 /// transcript (the last one wins, and a running Claude Code takes it from there) plus the
 /// `<session id>/custom-title.json` beside it that `claude --resume` reads. An empty name goes back
@@ -537,6 +628,63 @@ mod tests {
     fn assistant(cwd: &str, ts: &str) -> Value {
         serde_json::json!({"type":"assistant","cwd":cwd,"timestamp":ts,"isSidechain":false,"gitBranch":"feat/x",
             "message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}})
+    }
+
+    #[test]
+    fn context_is_what_the_last_request_sent() {
+        let root = temp_root();
+        let path = root.join("s.jsonl");
+        let sent = |new: u64, read: u64, written: u64, side: bool| {
+            serde_json::json!({"type":"assistant","isSidechain":side,"message":{"role":"assistant","content":[],
+                "usage":{"input_tokens":new,"cache_read_input_tokens":read,"cache_creation_input_tokens":written,"output_tokens":9}}})
+        };
+        let prompt = user("/x", "2026-02-01T00:00:00.000Z", Value::String("hi".into()));
+        write_jsonl(
+            &path,
+            &[
+                prompt.clone(),
+                sent(10, 1_000, 200, false),
+                sent(3, 250_000, 4_000, false),
+                // not the session's own request, and lines that count nothing
+                sent(1, 5, 5, true),
+                serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[],"usage":{"input_tokens":0}}}),
+                serde_json::json!({"type":"cost-state","totalCostUSD":1.0}),
+            ],
+        );
+        assert_eq!(context_tokens(&path), Some(254_003));
+        assert_eq!(parse_meta(&path).unwrap().context_tokens, Some(254_003));
+        write_jsonl(&path, &[prompt]);
+        assert_eq!(context_tokens(&path), None, "nothing sent yet");
+        assert_eq!(context_tokens(&root.join("gone.jsonl")), None);
+        // a read that starts inside a line
+        let lines = [r#"cache_read_input_tokens":7,"usage":1}}}"#.to_string(), sent(1, 2, 3, false).to_string()];
+        assert_eq!(context_of(lines.iter()), Some(6));
+        assert_eq!(context_of(lines[..1].iter()), None);
+    }
+
+    #[test]
+    fn a_tabs_transcript_follows_clear_but_not_another_tab() {
+        let config = temp_root();
+        let folder = temp_root();
+        let cwd = std::fs::canonicalize(&folder).unwrap().to_string_lossy().into_owned();
+        let dir = config.join("projects").join(encode_cwd(&cwd));
+        let line = [user(&cwd, "2026-02-01T00:00:00.000Z", Value::String("hi".into()))];
+        let at = |name: &str, secs: u64| {
+            let p = dir.join(format!("{name}.jsonl"));
+            write_jsonl(&p, &line);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+            p
+        };
+        let (started, cleared, other) = (at("started", 1_000), at("cleared", 2_000), at("other-tab", 3_000));
+        let root = config.join("projects");
+        let launch = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500));
+        let pick = |since, exclude: &[&str]| current_transcript(&root, &cwd, Some("started"), since, &exclude.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(pick(launch, &["other-tab"]), Some(cleared), "the one it moved on to, not another tab's");
+        assert_eq!(pick(launch, &[]), Some(other));
+        assert_eq!(pick(launch, &["other-tab", "cleared"]), Some(started.clone()), "nothing newer of its own: the one it started with");
+        assert_eq!(pick(None, &[]), Some(started));
+        assert_eq!(current_transcript(&root, &cwd, Some("../x"), None, &[]), None);
+        assert_eq!(current_transcript(&root, &cwd, None, None, &[]), None);
     }
 
     /// A host's sessions (read in part over SSH) match the same files read whole here.

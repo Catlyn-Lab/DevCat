@@ -19,6 +19,18 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
   another agent picks the list up. Tick an item done or move it from its menu; a dot on the icon means something
   waits on you. It is off until you turn it on in the To do panel (**Agents keep this list**): keeping the list
   costs your agents some tokens, and they get the tools from their next session.
+- **Claude tab: how large the session's context is**: next to the session id, the tab shows how many tokens the
+  conversation holds (`312K context`), in the warning color from 200K. Claude reads all of it again with every
+  step, so a long session costs more per step than a new one; **New session** starts small again. The Sessions list
+  shows it for sessions of 100K and more, so you see what resuming one costs.
+- **Shorter answers from DevCat's tools, so agents spend fewer tokens**: a long `db_query` answer stops at a row and
+  says how many rows it showed; `db_schema` of a large database lists the tables' names and asks for one table;
+  `k8s_logs` and `docker_logs` keep the newest lines of a long log and take `contains` to return only the lines
+  with a text; `k8s_get` leaves out the copy of the last applied manifest; `k8s_overview` shows the 15 newest
+  warnings as one line each.
+- **Delegating to other models: large jobs only**: with models allowed for `agent_delegate`, agents were told to
+  delegate by default, even small work. They are now told to hand over large mechanical code work (a module or
+  test suite of more than about 150 lines, the same edit across many files, boilerplate) and do the rest themselves.
 - **DevCat Agent: put the files back to before a message**: the agent saves the project's files before it changes
   them (once a turn, and again before a command that deletes or overwrites), in a store of its own that never
   touches the project's `.git`. **Restore files** on one of your messages shows which files would change, then puts
