@@ -135,13 +135,14 @@ impl Tool for DockerLogs {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "docker_logs".into(),
-            description: "Read a container's recent logs from a DevCat Docker connection: the last `tail` lines (default 200), optionally only `since` a time (\"10m\", \"2h\", an RFC 3339 time) and with timestamps.".into(),
+            description: "Read a container's recent logs from a DevCat Docker connection: the last `tail` lines (default 200, at most 5000), optionally only `since` a time (\"10m\", \"2h\", an RFC 3339 time) and with timestamps. `contains` keeps only the lines with that text (any letter case): to find an error further back, give it with a larger `tail` instead of reading them all. A long answer keeps its newest lines and says how many older ones it left out.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "connection": { "type": "string", "description": "Docker connection name or id" },
                     "container": { "type": "string", "description": "Container name or id" },
                     "tail": { "type": "integer" },
+                    "contains": { "type": "string", "description": "Only the lines with this text" },
                     "since": { "type": "string" },
                     "timestamps": { "type": "boolean" }
                 },
@@ -166,8 +167,7 @@ impl Tool for DockerLogs {
         let Some(id) = arg(&input, "container") else { return ToolOutput::err("Missing `container`.") };
         let tail = input.get("tail").and_then(Value::as_u64).unwrap_or(200).clamp(1, 5000) as u32;
         match dk::docker_logs_tail(St::get(), c.id.clone(), id, tail, arg_bool(&input, "timestamps").unwrap_or(false), arg(&input, "since")).await {
-            Ok(text) if text.trim().is_empty() => ToolOutput::ok("(no log lines)"),
-            Ok(text) => ToolOutput::ok(text),
+            Ok(text) => ToolOutput::ok(log_reply(&text, arg(&input, "contains").as_deref())),
             Err(e) => ToolOutput::err(connect_error(&self.0, &c, &e.to_string())),
         }
     }

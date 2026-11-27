@@ -49,6 +49,11 @@ const DEFAULT_ROWS: usize = 100;
 const MAX_ROWS: usize = 1000;
 /// Longest cell shown; longer values keep their start.
 const MAX_CELL: usize = 300;
+/// Most characters of an answer made of rows or lines (a query's rows, a log, a schema). Past it
+/// the answer says what it left out and how to get it. Everything an agent is answered stays in
+/// its context for the rest of the session, and the harness's own cut (`MAX_OUTPUT`) comes late
+/// and takes the middle out, whatever a row is.
+const REPLY_BUDGET: usize = 12_000;
 
 /// Whose connections the tools work with. Resolved on every call, so connections and projects
 /// changed in the app apply right away.
@@ -502,27 +507,61 @@ impl Tool for DbSchema {
                 Err(e) => ToolOutput::err(e.to_string()),
             };
         }
-        match tables_text(&driver, database.as_deref(), schema.as_deref()).await {
-            Ok(Some(text)) => ToolOutput::ok(text),
-            Ok(None) => ToolOutput::ok("No tables found (check `database` / `schema`)."),
+        match tables(&driver, database.as_deref(), schema.as_deref()).await {
+            Ok(t) => match t.text() {
+                // a big database: its tables' names, and the columns one table at a time
+                Some(text) if text.len() > REPLY_BUDGET => ToolOutput::ok(t.names()),
+                Some(text) => ToolOutput::ok(text),
+                None => ToolOutput::ok("No tables found (check `database` / `schema`)."),
+            },
             Err(e) => ToolOutput::err(e.to_string()),
         }
     }
 }
 
+/// A database's tables (name, columns as `name type`) and views.
+struct Tables {
+    tables: Vec<(String, Vec<String>)>,
+    views: Vec<String>,
+}
+
+impl Tables {
+    /// Every table with its columns, and the views, one per line; None when there are none.
+    fn text(&self) -> Option<String> {
+        let mut out: Vec<String> = self.tables.iter().map(|(name, cols)| format!("{name}({})", cols.join(", "))).collect();
+        out.extend(self.views.iter().map(|v| format!("view {v}")));
+        (!out.is_empty()).then(|| format!("{} tables, {} views:\n{}", self.tables.len(), self.views.len(), out.join("\n")))
+    }
+
+    /// The tables by name with how many columns each has, for a database whose [`Tables::text`] is too long.
+    fn names(&self) -> String {
+        let mut out: Vec<String> = self.tables.iter().map(|(name, cols)| format!("{name} ({} columns)", cols.len())).collect();
+        out.extend(self.views.iter().map(|v| format!("view {v}")));
+        format!(
+            "{} tables, {} views. Too many to show with their columns: these are their names; pass `table` to read one table's columns, indexes and foreign keys.\n{}",
+            self.tables.len(),
+            self.views.len(),
+            out.join("\n")
+        )
+    }
+}
+
+async fn tables(driver: &crate::db::DynDriver, database: Option<&str>, schema: Option<&str>) -> crate::error::AppResult<Tables> {
+    let s = driver.schema_snapshot(database, schema).await?;
+    let tables = s
+        .tables
+        .iter()
+        .map(|t| {
+            let cols = t.columns.iter().map(|c| format!("{} {}{}", c.name, c.data_type, if c.is_primary_key { " PK" } else { "" })).collect();
+            (t.table.as_ref().map(qualified).unwrap_or_default(), cols)
+        })
+        .collect();
+    Ok(Tables { tables, views: s.views.iter().map(|(v, _)| qualified(v)).collect() })
+}
+
 /// Every table with its columns, and the views, one per line; None when there are none.
 async fn tables_text(driver: &crate::db::DynDriver, database: Option<&str>, schema: Option<&str>) -> crate::error::AppResult<Option<String>> {
-    let s = driver.schema_snapshot(database, schema).await?;
-    let mut out = Vec::new();
-    for t in &s.tables {
-        let name = t.table.as_ref().map(qualified).unwrap_or_default();
-        let cols: Vec<String> = t.columns.iter().map(|c| format!("{} {}{}", c.name, c.data_type, if c.is_primary_key { " PK" } else { "" })).collect();
-        out.push(format!("{name}({})", cols.join(", ")));
-    }
-    for (v, _) in &s.views {
-        out.push(format!("view {}", qualified(v)));
-    }
-    Ok((!out.is_empty()).then(|| format!("{} tables, {} views:\n{}", s.tables.len(), s.views.len(), out.join("\n"))))
+    Ok(tables(driver, database, schema).await?.text())
 }
 
 /// A failed connect. A connection behind a VPN / tunnel connects it first, in the process that
@@ -558,7 +597,7 @@ impl Tool for DbQuery {
                     "connection": { "type": "string", "description": "Connection name or id" },
                     "query": { "type": "string" },
                     "database": { "type": "string", "description": "Database (or Redis db number), if not the connection's default" },
-                    "max_rows": { "type": "integer", "description": "Rows to return per statement (default 100, at most 1000)" }
+                    "max_rows": { "type": "integer", "description": "Rows to return per statement (default 100, at most 1000). A long answer stops at about 12,000 characters and says how many rows it showed: select fewer columns, filter, or page" }
                 },
                 "required": ["connection", "query"]
             }),
@@ -627,16 +666,25 @@ fn reads_only(c: &ConnectionConfig, query: &str) -> bool {
     c.read_only || crate::remote::readonly::allowed(Some(c.kind), query)
 }
 
-/// One statement's result as text: a header line and rows separated by ` | `.
+/// One statement's result as text: a header line and rows separated by ` | `. Rows stop at
+/// [`REPLY_BUDGET`] (the first always shows), and the last line says how many were shown.
 fn format_result(r: &QueryResult) -> String {
     let mut out = Vec::new();
     if !r.columns.is_empty() {
         out.push(r.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" | "));
+        let (mut used, mut shown) = (0, 0);
         for row in &r.rows {
-            out.push(row.iter().map(cell).collect::<Vec<_>>().join(" | "));
+            let line = row.iter().map(cell).collect::<Vec<_>>().join(" | ");
+            if shown > 0 && used + line.len() > REPLY_BUDGET {
+                break;
+            }
+            used += line.len() + 1;
+            shown += 1;
+            out.push(line);
         }
         let n = r.rows.len();
-        out.push(format!("({n} row{}{}, {} ms)", if n == 1 { "" } else { "s" }, if r.truncated { ", more not shown: add a LIMIT / filter or raise max_rows" } else { "" }, r.elapsed_ms));
+        let cut = if shown < n { format!(", the first {shown} shown because the answer was getting long: select fewer columns, filter, or page with LIMIT / OFFSET (`db_export` writes every row to a file)") } else { String::new() };
+        out.push(format!("({n} row{}{}{cut}, {} ms)", if n == 1 { "" } else { "s" }, if r.truncated { ", more not shown: add a LIMIT / filter or raise max_rows" } else { "" }, r.elapsed_ms));
     } else if let Some(n) = r.rows_affected {
         out.push(format!("{n} row{} affected ({} ms)", if n == 1 { "" } else { "s" }, r.elapsed_ms));
     }
@@ -1095,6 +1143,7 @@ impl Tool for K8sGet {
         if let Some(name) = s("name") {
             return match crate::infra::k8s::k8s_get(state, c.id.clone(), kind, s("namespace"), name).await {
                 Ok(mut v) => {
+                    slim(&mut v);
                     redact_secret(&mut v);
                     ToolOutput::ok(serde_json::to_string_pretty(&v).unwrap_or_default())
                 }
@@ -1145,6 +1194,42 @@ fn k8s_line(o: &Value) -> String {
     format!("{ns}{name}  {}  {created}", status.join(", ")).trim_end().to_string()
 }
 
+/// What an agent doesn't need of an object it reads whole: the field managers' bookkeeping, and
+/// kubectl's copy of the manifest it last applied, which says the object a second time.
+fn slim(v: &mut Value) {
+    if let Some(meta) = v.get_mut("metadata").and_then(Value::as_object_mut) {
+        meta.remove("managedFields");
+        if let Some(ann) = meta.get_mut("annotations").and_then(Value::as_object_mut) {
+            ann.remove("kubectl.kubernetes.io/last-applied-configuration");
+        }
+    }
+}
+
+/// A log as an agent reads it: only the lines with `contains` when it is given (any letter case),
+/// and of a log longer than [`REPLY_BUDGET`] the newest lines that fit, under a line saying how
+/// many older ones were left out. The newest stay because a log is read from its end; the
+/// harness's own cut keeps the oldest two thirds.
+fn log_reply(text: &str, contains: Option<&str>) -> String {
+    let needle = contains.map(str::to_lowercase).filter(|n| !n.is_empty());
+    let lines: Vec<&str> = text.lines().filter(|l| needle.as_ref().is_none_or(|n| l.to_lowercase().contains(n.as_str()))).collect();
+    if lines.iter().all(|l| l.trim().is_empty()) {
+        return match &needle {
+            Some(_) => format!("(no log line contains \"{}\")", contains.unwrap_or_default()),
+            None => "(no log lines)".into(),
+        };
+    }
+    let (mut from, mut used) = (lines.len(), 0);
+    while from > 0 && (from == lines.len() || used + lines[from - 1].len() < REPLY_BUDGET) {
+        from -= 1;
+        used += lines[from].len() + 1;
+    }
+    let body = lines[from..].join("\n");
+    if from == 0 {
+        return body;
+    }
+    format!("[{from} older line{} not shown because the answer was getting long: narrow it with `contains`, or ask for fewer lines]\n{body}", if from == 1 { "" } else { "s" })
+}
+
 /// Secret data stays in the cluster: only the keys and sizes are shown.
 fn redact_secret(v: &mut Value) {
     if v["kind"] != "Secret" {
@@ -1170,7 +1255,7 @@ impl Tool for K8sLogs {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "k8s_logs".into(),
-            description: "Read the recent logs of a pod in one of the user's cluster connections (the last `tail_lines` lines, default 200). `previous: true` reads the container's previous run (after a crash).".into(),
+            description: "Read the recent logs of a pod in one of the user's cluster connections (the last `tail_lines` lines, default 200, at most 5000). `contains` keeps only the lines with that text (any letter case): to find an error further back, give it with more `tail_lines` instead of reading them all. A long answer keeps its newest lines and says how many older ones it left out. `previous: true` reads the container's previous run (after a crash).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1179,6 +1264,7 @@ impl Tool for K8sLogs {
                     "pod": { "type": "string" },
                     "container": { "type": "string", "description": "Needed when the pod has several containers" },
                     "tail_lines": { "type": "integer" },
+                    "contains": { "type": "string", "description": "Only the lines with this text" },
                     "previous": { "type": "boolean" }
                 },
                 "required": ["connection", "namespace", "pod"]
@@ -1212,8 +1298,7 @@ impl Tool for K8sLogs {
             ..LogParams::default()
         };
         match Api::<Pod>::namespaced(conn.client.clone(), &ns).logs(&pod, &lp).await {
-            Ok(text) if text.trim().is_empty() => ToolOutput::ok("(no log lines)"),
-            Ok(text) => ToolOutput::ok(text),
+            Ok(text) => ToolOutput::ok(log_reply(&text, s("contains").as_deref())),
             Err(e) => ToolOutput::err(e.to_string()),
         }
     }
@@ -1222,6 +1307,45 @@ impl Tool for K8sLogs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_answers_say_what_they_left_out() {
+        // a query: rows stop at a row, and the last line says how many showed
+        let row = |n: usize| vec![json!(n), json!("x".repeat(200))];
+        let r = QueryResult { columns: vec![crate::db::ColumnInfo { name: "id".into(), type_name: "int".into() }, crate::db::ColumnInfo { name: "note".into(), type_name: "text".into() }], rows: (0..500).map(row).collect(), elapsed_ms: 3, ..Default::default() };
+        let text = format_result(&r);
+        assert!(text.len() < REPLY_BUDGET + 600, "{}", text.len());
+        let shown = text.lines().count() - 2;
+        assert!(shown > 40 && shown < 500 && text.lines().nth(shown).unwrap().starts_with(&format!("{} | ", shown - 1)), "{shown}");
+        assert!(text.ends_with(&format!("(500 rows, the first {shown} shown because the answer was getting long: select fewer columns, filter, or page with LIMIT / OFFSET (`db_export` writes every row to a file), 3 ms)")), "{}", &text[text.len() - 220..]);
+        let one = QueryResult { columns: r.columns.clone(), rows: vec![vec![json!(1), json!("y".repeat(300))]; 60], ..Default::default() };
+        assert!(format_result(&one).lines().count() > 30, "wide rows still show, fewer of them");
+
+        // a schema: the columns while they fit, else the tables' names
+        let small = Tables { tables: vec![("a".into(), vec!["id int PK".into(), "n text".into()])], views: vec!["v".into()] };
+        assert_eq!(small.text().unwrap(), "1 tables, 1 views:\na(id int PK, n text)\nview v");
+        assert!(Tables { tables: vec![], views: vec![] }.text().is_none());
+        let big = Tables { tables: (0..300).map(|n| (format!("public.table_{n}"), (0..12).map(|c| format!("column_{c} text")).collect())).collect(), views: vec![] };
+        assert!(big.text().unwrap().len() > REPLY_BUDGET);
+        let names = big.names();
+        assert!(names.starts_with("300 tables, 0 views. Too many to show with their columns") && names.contains("\npublic.table_299 (12 columns)") && names.len() < REPLY_BUDGET, "{}", names.len());
+
+        // a log: the newest lines, or only the ones asked for
+        let log: String = (0..3000).map(|n| format!("2026-11-28T00:00:00Z line {n} {}\n", if n % 1000 == 7 { "ERROR boom" } else { "ok and a few more words to make it a line" })).collect();
+        let tail = log_reply(&log, None);
+        assert!(tail.len() < REPLY_BUDGET + 200 && tail.ends_with("line 2999 ok and a few more words to make it a line"), "{}", tail.len());
+        let left: usize = tail.lines().next().unwrap().trim_start_matches('[').split(' ').next().unwrap().parse().unwrap();
+        assert_eq!(left + tail.lines().count() - 1, 3000, "{}", tail.lines().next().unwrap());
+        assert_eq!(log_reply(&log, Some("error")).lines().count(), 3, "only the lines asked for, any letter case");
+        assert_eq!(log_reply("a\nb\n", None), "a\nb");
+        assert_eq!(log_reply("a\nb\n", Some("zzz")), "(no log line contains \"zzz\")");
+        assert_eq!(log_reply("\n", None), "(no log lines)");
+
+        // an object read whole: without what repeats it
+        let mut dep = json!({ "kind": "Deployment", "metadata": { "name": "api", "managedFields": [{ "manager": "kubectl" }], "annotations": { "kubectl.kubernetes.io/last-applied-configuration": "{...}", "note": "kept" } }, "spec": { "replicas": 2 } });
+        slim(&mut dep);
+        assert_eq!(dep, json!({ "kind": "Deployment", "metadata": { "name": "api", "annotations": { "note": "kept" } }, "spec": { "replicas": 2 } }));
+    }
 
     #[test]
     fn projects_with_folders_keep_their_connections_to_them() {
