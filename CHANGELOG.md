@@ -23,6 +23,10 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
   touches the project's `.git`. **Restore files** on one of your messages shows which files would change, then puts
   them back; the files as they were are saved first, so a restore can be undone too, and the agent is told with
   your next message. Not in ghost chats or folders on SSH hosts.
+- **Closing a tab ends everything it started**: closing a terminal or Claude Code tab now also ends what its program
+  started (MCP servers, a dev server, a build), instead of leaving them running; so does a program exiting by itself,
+  and quitting DevCat. Detached programs (ssh's shared connection, tmux) keep running. A DevCat Agent chat's MCP
+  servers end with the chat, and when DevCat quits, with whatever they started.
 - **DevCat Agent: commands that could wreck the computer always ask**: deleting the disk or a system or home folder,
   writing to a raw disk, piping a download into a shell, `sudo -S`, fork bombs and shutting down ask every time,
   also in auto-edit and Bypass, and "always allow" doesn't carry over to the next one. The approval says why.
