@@ -12,9 +12,9 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
 
 ## Unreleased
 
-- **To do list: off until you turn it on** (#254): agents keep the To do list only where you want one. After this
+- **To do list: off until you turn it on** (#254): agents keep To do lists only when you turn that on. After this
   update it is off, also where your agents were keeping a list: turn it on again in the To do panel (**Agents keep
-  this list**, or **Turn on** in the empty panel). The lists already written stay. Keeping the list costs your agents
+  To do lists**, or **Turn on** in the empty panel; one switch for every project). The lists already written stay. Keeping the list costs your agents
   tokens, so while it is off they get no To do tools and DevCat tells them nothing about it; they get the tools from
   their next session after you turn it on. `todo_write` now answers with what changed instead of the whole list.
 

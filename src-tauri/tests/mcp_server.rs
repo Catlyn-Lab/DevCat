@@ -55,10 +55,17 @@ async fn serves_the_folders_connections() {
     let rest = [
         "devcat_connections", "devcat_connection_test", "db_history", "db_saved_query_save", "devcat_open_file", "db_open_query", "devcat_connection_add",
         "agent_jobs", "agent_job_save", "agent_job_run", "net_status", "net_profile_save", "db_schema", "db_query", "db_ddl", "db_import", "db_dump",
-        "db_export", "devcat_notes", "devcat_note_write", "todo_write", "todo_list",
+        "db_export", "devcat_notes", "devcat_note_write",
     ]
     .map(|n| format!("mcp__devcat__{n}"));
-    assert_eq!(names[memory.len()..], rest);
+    assert_eq!(names[memory.len()..], rest, "and no To do tools: the list is off until the user turns it on");
+    // turned on (the To do panel's switch): the two tools are offered too
+    std::fs::create_dir_all(data.join("todos")).unwrap();
+    std::fs::write(data.join("todos").join(".settings.json"), r#"{"enabled":true}"#).unwrap();
+    let with_todo: Vec<String> = start(&data, &["--folder", &repo.to_string_lossy()]).await.iter().map(|t| t.spec().name).collect();
+    assert_eq!(with_todo[..names.len()], names[..]);
+    assert_eq!(with_todo[names.len()..], ["mcp__devcat__todo_write", "mcp__devcat__todo_list"]);
+    std::fs::remove_file(data.join("todos").join(".settings.json")).unwrap();
     let list = call(&tools, "devcat_connections", json!({})).await;
     assert!(list.content.contains("Project Shop") && list.content.contains("shop-db") && list.content.contains("notes"), "{}", list.content);
     assert!(!list.content.contains("secret"), "AI access off: no agent sees it: {}", list.content);

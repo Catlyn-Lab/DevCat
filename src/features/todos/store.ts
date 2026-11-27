@@ -26,6 +26,8 @@ interface TodosState {
 }
 
 let lastFocus: string | null = null;
+/** Counts loads and changes of the switch: an answer asked for before a later one is dropped. */
+let seq = 0;
 
 export const useTodos = create<TodosState>((set, get) => ({
   lists: [],
@@ -36,28 +38,31 @@ export const useTodos = create<TodosState>((set, get) => ({
   enabled: false,
   setEnabled: async (on) => {
     const was = get().enabled;
+    seq++; // a load asked for before this would put the old value back
     set({ enabled: on });
     try {
-      await api.todosSetEnabled(on);
-      set({ error: null });
+      await api.todosSetEnabled(on); // the backend's event reloads every window
     } catch (e) {
       set({ enabled: was, error: errMsg(e) });
     }
   },
   load: async (focus) => {
     lastFocus = focus;
+    const mine = ++seq;
     try {
       const [lists, enabled] = await Promise.all([api.todosLists(), api.todosEnabled()]);
+      // the switch first: it doesn't depend on the list, which may fail to load
+      if (mine === seq) set({ enabled: !!enabled });
       let list: TodoList | null = null;
       if (focus) list = await api.todosGet({ projectId: focus });
       else {
         const key = lists.find((l) => l.key === get().picked)?.key ?? lists[0]?.key;
         if (key) list = await api.todosGet({ key });
       }
-      if (focus !== lastFocus) return; // the focus changed meanwhile
-      set({ lists, list, enabled, loaded: true, error: null });
+      if (mine !== seq) return; // a newer load (the focus changed) or the switch came meanwhile
+      set({ lists, list, loaded: true, error: null });
     } catch (e) {
-      set({ loaded: true, error: errMsg(e) });
+      if (mine === seq) set({ loaded: true, error: errMsg(e) });
     }
   },
   pick: (key) => {

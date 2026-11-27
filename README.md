@@ -204,7 +204,8 @@ of these step by step, with every keyboard shortcut on
 - **To do**: the list your coding agents keep for each project (`todo_write` / `todo_list` over MCP, `project_todo_write`
   / `project_todo_list` in the DevCat Agent): Running, Next, Waiting on others, Waiting on you, Done, with links to PRs, issues and files. It outlives
   agent sessions; tick items done or move them in the sidebar. Off until you turn it on in the To do panel
-  (**Agents keep this list**): agents get the tools from their next session, and spend some tokens keeping the list.
+  (**Agents keep To do lists**, one switch for every project): agents get the tools from their next session, and
+  spend some tokens keeping the list.
 - **Automatic updates**: DevCat checks GitHub releases and offers new versions in a popup (Update and restart / Later /
   Skip this version), or use *DevCat → Check for Updates…* (macOS menu bar), *Check for updates…* in the project menu
   or click the version in the status bar. Updates are

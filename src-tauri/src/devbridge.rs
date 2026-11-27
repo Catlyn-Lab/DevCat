@@ -203,6 +203,8 @@ async fn call(cmd: &str, args: &Value) -> Result<Value, Value> {
         "todos_lists" => out(c!(crate::todos::todos_lists)),
         "todos_get" => out(c!(crate::todos::todos_get, "key", "projectId")),
         "todos_edit" => out(c!(crate::todos::todos_edit, "key", "changes", "remove")),
+        "todos_enabled" => out(c!(crate::todos::todos_enabled)),
+        "todos_set_enabled" => out(c!(crate::todos::todos_set_enabled, "enabled")),
         "memory_list" => out(c!(crate::memory::memory_list)),
         "memory_save" => out(c!(crate::memory::memory_save, "memory")),
         "memory_delete" => out(c!(crate::memory::memory_delete, "place", "name")),

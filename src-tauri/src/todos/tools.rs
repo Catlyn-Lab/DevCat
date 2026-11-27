@@ -56,6 +56,8 @@ fn named(scope: &Scope, origin: &str, names: Names, on: bool) -> Vec<Arc<dyn Too
 }
 
 const NO_PLACE: &str = "The To do list belongs to a project: this folder isn't a project or repository DevCat knows. Work from the project's folder.";
+/// A tool an agent still holds after the user turned the list off (its session started before).
+const OFF: &str = "The user turned the To do list off in DevCat: don't keep it for now.";
 
 fn group_names() -> Vec<&'static str> {
     Group::ALL.iter().map(|g| g.name()).collect()
@@ -255,6 +257,9 @@ impl Tool for TodoWrite {
         }
     }
     async fn run(&self, input: Value, _: &ToolCtx) -> ToolOutput {
+        if !super::enabled() {
+            return ToolOutput::err(OFF);
+        }
         let Some(place) = self.0.here.clone() else { return ToolOutput::err(NO_PLACE) };
         let edit = match edit(&input) {
             Ok(e) => e,
@@ -302,6 +307,9 @@ impl Tool for TodoListTool {
         str_field(input, &["group"]).unwrap_or("").to_string()
     }
     async fn run(&self, input: Value, _: &ToolCtx) -> ToolOutput {
+        if !super::enabled() {
+            return ToolOutput::err(OFF);
+        }
         let Some(place) = self.0.here.clone() else { return ToolOutput::err(NO_PLACE) };
         let only = match str_field(&input, &["group"]).map(str::trim).filter(|g| !g.is_empty()) {
             None => None,
