@@ -163,6 +163,7 @@ pub mod clipboard;
 pub mod git;
 pub(crate) mod locate;
 pub mod pty;
+mod procs;
 pub mod remote;
 pub mod sftp;
 pub mod ssh_claude;

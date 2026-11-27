@@ -1586,6 +1586,9 @@ pub fn shutdown_all() {
         run.cancel.lock().cancel();
         run.approver.deny_all();
     }
+    // Chats' MCP servers and what they started: dropping the chats would end them, but exiting
+    // drops nothing.
+    devcat_harness::mcp::stop_all();
     // the app is quitting: nothing of a ghost chat stays
     if let Ok(g) = ghost_dir() {
         let _ = std::fs::remove_dir_all(g);
