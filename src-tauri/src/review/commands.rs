@@ -1,7 +1,7 @@
 //! The review tab's commands (app windows only: a review webview gets none of them).
 
 use super::webview::{self, call, find};
-use super::{channel, file_start, no_review, review_date, review_store, save_review, serve, url_start, Rendered, Review, ReviewDoc, Target};
+use super::{channel, file_start, images, no_review, review_date, review_store, save_review, serve, url_start, Rendered, Review, ReviewDoc, Target};
 use crate::error::{AppError, AppResult};
 use crate::notes::Note;
 use crate::state::St;
@@ -193,7 +193,8 @@ pub async fn review_remove(app: AppHandle, window: Window, id: String, n: u32) -
 #[tauri::command]
 pub async fn review_render(window: Window, id: String, styles: bool) -> AppResult<Rendered> {
     owned(&id, &window)?;
-    review_store().render(&id, styles, &review_date(chrono::Local::now().date_naive()))
+    let root = webview::images_root();
+    review_store().render(&id, styles, &review_date(chrono::Local::now().date_naive()), root.as_deref())
 }
 
 /// Saves exactly the text `review_render` showed for `rev`; refused when the review changed since.
@@ -210,14 +211,73 @@ pub async fn review_finish(app: AppHandle, window: Window, state: St, id: String
 }
 
 #[tauri::command]
-pub async fn review_close(app: AppHandle, window: Window, id: String) -> AppResult<()> {
-    let _g = CREATING.lock();
-    owned(&id, &window)?;
-    review_store().close(&id);
-    if let Some(wv) = find(&app, &id) {
-        wv.close().map_err(|e| AppError::Msg(format!("Couldn't close the review page: {e}")))?;
+pub async fn review_close(app: AppHandle, window: Window, state: St, id: String) -> AppResult<()> {
+    {
+        let _g = CREATING.lock();
+        owned(&id, &window)?;
+        review_store().close(&id);
+        if let Some(wv) = find(&app, &id) {
+            wv.close().map_err(|e| AppError::Msg(format!("Couldn't close the review page: {e}")))?;
+        }
     }
+    prune_images(&state.notes);
     Ok(())
+}
+
+fn images_root() -> AppResult<std::path::PathBuf> {
+    webview::images_root().ok_or_else(|| AppError::Msg("DevCat's data folder isn't set".into()))
+}
+
+/// Deletes the images that no saved note names, except those of reviews still open.
+pub fn prune_images(notes: &crate::notes::NoteStore) {
+    let (Some(root), Ok(list)) = (webview::images_root(), notes.list()) else { return };
+    let bodies: Vec<String> = list.into_iter().map(|n| n.body).collect();
+    images::prune(&root, &bodies, &review_store().ids());
+}
+
+/// Adds an image (base64, pasted or dropped in the notes list) to a note.
+#[tauri::command]
+pub async fn review_image_add(app: AppHandle, window: Window, id: String, n: u32, data: String) -> AppResult<ReviewDoc> {
+    use base64::Engine;
+    owned(&id, &window)?;
+    // base64 is 4/3 the size: refuse a huge one before decoding it
+    if data.len() > images::MAX_BYTES / 3 * 4 + 8 {
+        return Err(AppError::Msg(format!("Images can be at most {} MB", images::MAX_BYTES / 1024 / 1024)));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| AppError::Msg(format!("Couldn't read the image: {e}")))?;
+    let name = images::add(&images_root()?, &id, &bytes)?;
+    let doc = review_store().add_image(&id, n, name)?;
+    channel::emit_changed(&app, &review_store().get(&id).ok_or_else(no_review)?);
+    Ok(doc)
+}
+
+#[tauri::command]
+pub async fn review_image_remove(app: AppHandle, window: Window, id: String, n: u32, name: String) -> AppResult<ReviewDoc> {
+    owned(&id, &window)?;
+    let doc = review_store().remove_image(&id, n, &name)?;
+    channel::emit_changed(&app, &review_store().get(&id).ok_or_else(no_review)?);
+    Ok(doc)
+}
+
+/// One of the review's images, as a `data:` URL for the notes list.
+#[tauri::command]
+pub async fn review_image(window: Window, id: String, name: String) -> AppResult<String> {
+    use base64::Engine;
+    owned(&id, &window)?;
+    if !review_store().has_image(&id, &name) {
+        return Err(AppError::Msg("Not an image of this review".into()));
+    }
+    let bytes = tokio::fs::read(images::path(&images_root()?, &id, &name)?).await?;
+    Ok(format!("data:{};base64,{}", images::mime(&name), base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// A review's text for a terminal in `cwd`: on an SSH host its images are copied there and the
+/// text names the host's copies (`images::for_host`).
+#[tauri::command]
+pub async fn review_text_for(cwd: String, text: String) -> AppResult<String> {
+    images::for_host(&images_root()?, &cwd, &text).await
 }
 
 #[tauri::command]
