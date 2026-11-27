@@ -246,6 +246,10 @@ pub enum Edit {
 #[derive(Debug, Clone)]
 pub struct Written {
     pub list: TodoList,
+    /// Ids of the items it added or changed, in the list's order.
+    pub changed: Vec<String>,
+    /// Ids it took off the list: asked for, left out of a replace, or done items beyond the limit.
+    pub removed: Vec<String>,
     /// Ids it removed that the list didn't have.
     pub unknown: Vec<String>,
     /// Where an unreadable file went.
@@ -271,13 +275,16 @@ fn write_at(key: &str, place: &Place, edit: Edit, origin: &str) -> AppResult<Wri
         Ok(l) => (l.unwrap_or_else(|| empty(key, place)), None),
         Err(_) => (empty(key, place), Some(set_aside(&path)?)),
     };
+    let before = old.items.clone();
     let (mut list, unknown) = edited(old, edit, origin, &now())?;
     list.key = key.to_string();
     list.place = place.clone();
     list.label = label(place);
     save(&list)?;
     crate::events::emit(EVENT, serde_json::json!({ "key": key }));
-    Ok(Written { list, unknown, set_aside })
+    let changed = list.items.iter().filter(|i| before.iter().find(|b| b.id == i.id) != Some(*i)).map(|i| i.id.clone()).collect();
+    let removed = before.iter().filter(|b| !list.items.iter().any(|i| i.id == b.id)).map(|b| b.id.clone()).collect();
+    Ok(Written { list, changed, removed, unknown, set_aside })
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -536,6 +543,11 @@ pub(crate) mod tests {
         assert!(load(&place).unwrap().items.is_empty(), "no list yet");
         let w = write(&place, Edit::Apply { changes: vec![change(serde_json::json!({ "text": "Ship it", "group": "running" }))], remove: vec![] }, "codex").unwrap();
         assert!(w.set_aside.is_none());
+        assert_eq!((w.changed, w.removed.len()), (vec!["t1".to_string()], 0), "a write says what it touched");
+        let more = Edit::Apply { changes: vec![change(serde_json::json!({ "text": "Later" })), change(serde_json::json!({ "id": "t1", "group": "running" }))], remove: vec![] };
+        assert_eq!(write(&place, more, "codex").unwrap().changed, vec!["t2".to_string()], "an item given as it already is didn't change");
+        let w = write(&place, Edit::Apply { changes: vec![], remove: vec!["t2".into(), "t9".into()] }, "codex").unwrap();
+        assert_eq!((w.changed.len(), w.removed, w.unknown), (0, vec!["t2".to_string()], vec!["t9".to_string()]));
         let path = file(&k).unwrap();
         // written whole: no temp file left next to it
         let names: Vec<String> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.contains(&k)).collect();
