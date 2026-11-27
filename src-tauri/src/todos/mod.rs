@@ -11,6 +11,8 @@
 //! - A file that isn't valid JSON is never overwritten: the next write moves it aside
 //!   (`<key>.bad-<time>.json`) and starts a new list.
 //! - After a change the windows reload the list (`devcat://todos` event).
+//! - Off until the user turns it on in the To do panel ([`enabled`]): off, no agent gets the
+//!   tools or is told about the list.
 pub mod tools;
 
 use crate::error::{AppError, AppResult};
@@ -43,6 +45,40 @@ pub fn init(data_dir: PathBuf) {
 
 fn dir() -> AppResult<PathBuf> {
     DATA_DIR.get().map(|d| d.join("todos")).ok_or_else(|| AppError::msg("DevCat's To do list isn't ready yet"))
+}
+
+// ---------- on or off
+
+/// The switch's file in `<data>/todos/`. Its name starts with a dot, so it is never a list's key
+/// and `todos_lists` passes it by.
+const SETTINGS: &str = ".settings.json";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Settings {
+    enabled: bool,
+}
+
+/// The switch as `dir` (`<data>/todos`) has it: off without the file, or with one that can't be read.
+fn enabled_in(dir: &Path) -> bool {
+    std::fs::read(dir.join(SETTINGS)).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).is_some_and(|s| s.enabled)
+}
+
+/// Whether agents keep To do lists. Off until the user turns it on in the To do panel: the tools
+/// and what agents are told about the list take room in every agent session, and each change to
+/// the list is one more call. Off, no agent gets the tools (`tools::for_scope`, `tools::for_agent`)
+/// or is told about the list (`mcp_server.rs`); the lists already written stay, and the panel still
+/// shows them. Read from the file each time: `devcat mcp` is another process than the app that
+/// writes it.
+pub fn enabled() -> bool {
+    dir().is_ok_and(|d| enabled_in(&d))
+}
+
+/// Turns agents' To do lists on or off, and tells the windows.
+pub fn set_enabled(on: bool) -> AppResult<()> {
+    crate::memory::write_atomic(&dir()?.join(SETTINGS), &serde_json::to_vec_pretty(&Settings { enabled: on })?)?;
+    crate::events::emit(EVENT, serde_json::json!({ "enabled": on }));
+    Ok(())
 }
 
 // ---------- items
@@ -246,6 +282,10 @@ pub enum Edit {
 #[derive(Debug, Clone)]
 pub struct Written {
     pub list: TodoList,
+    /// Ids of the items it added or changed, in the list's order.
+    pub changed: Vec<String>,
+    /// Ids it took off the list: asked for, left out of a replace, or done items beyond the limit.
+    pub removed: Vec<String>,
     /// Ids it removed that the list didn't have.
     pub unknown: Vec<String>,
     /// Where an unreadable file went.
@@ -271,13 +311,16 @@ fn write_at(key: &str, place: &Place, edit: Edit, origin: &str) -> AppResult<Wri
         Ok(l) => (l.unwrap_or_else(|| empty(key, place)), None),
         Err(_) => (empty(key, place), Some(set_aside(&path)?)),
     };
+    let before = old.items.clone();
     let (mut list, unknown) = edited(old, edit, origin, &now())?;
     list.key = key.to_string();
     list.place = place.clone();
     list.label = label(place);
     save(&list)?;
     crate::events::emit(EVENT, serde_json::json!({ "key": key }));
-    Ok(Written { list, unknown, set_aside })
+    let changed = list.items.iter().filter(|i| before.iter().find(|b| b.id == i.id) != Some(*i)).map(|i| i.id.clone()).collect();
+    let removed = before.iter().filter(|b| !list.items.iter().any(|i| i.id == b.id)).map(|b| b.id.clone()).collect();
+    Ok(Written { list, changed, removed, unknown, set_aside })
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -456,6 +499,18 @@ pub async fn todos_edit(key: String, changes: Vec<Change>, remove: Vec<String>) 
     write_key(&key, Edit::Apply { changes, remove })
 }
 
+/// Whether agents keep To do lists (the panel's switch).
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn todos_enabled() -> AppResult<bool> {
+    Ok(enabled())
+}
+
+/// The panel's switch: agents keep To do lists, or don't.
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn todos_set_enabled(enabled: bool) -> AppResult<()> {
+    set_enabled(enabled)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -463,6 +518,29 @@ pub(crate) mod tests {
     pub(crate) fn data() {
         let d = crate::memory::tests::data();
         init(d);
+    }
+
+    /// The tests' data folder with the To do list turned on (once: the tests share the folder).
+    pub(crate) fn on() {
+        static ON: std::sync::Once = std::sync::Once::new();
+        data();
+        ON.call_once(|| set_enabled(true).unwrap());
+    }
+
+    #[test]
+    fn off_until_the_user_turns_it_on() {
+        let dir = std::env::temp_dir().join(format!("devcat-todo-switch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!enabled_in(&dir), "no file yet: off");
+        std::fs::write(dir.join(SETTINGS), br#"{"enabled":true}"#).unwrap();
+        assert!(enabled_in(&dir));
+        std::fs::write(dir.join(SETTINGS), br#"{"enabled":false}"#).unwrap();
+        assert!(!enabled_in(&dir));
+        std::fs::write(dir.join(SETTINGS), b"{ not json").unwrap();
+        assert!(!enabled_in(&dir), "a file that can't be read: off");
+        std::fs::write(dir.join(SETTINGS), b"{}").unwrap();
+        assert!(!enabled_in(&dir));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn change(v: serde_json::Value) -> Change {
@@ -536,6 +614,11 @@ pub(crate) mod tests {
         assert!(load(&place).unwrap().items.is_empty(), "no list yet");
         let w = write(&place, Edit::Apply { changes: vec![change(serde_json::json!({ "text": "Ship it", "group": "running" }))], remove: vec![] }, "codex").unwrap();
         assert!(w.set_aside.is_none());
+        assert_eq!((w.changed, w.removed.len()), (vec!["t1".to_string()], 0), "a write says what it touched");
+        let more = Edit::Apply { changes: vec![change(serde_json::json!({ "text": "Later" })), change(serde_json::json!({ "id": "t1", "group": "running" }))], remove: vec![] };
+        assert_eq!(write(&place, more, "codex").unwrap().changed, vec!["t2".to_string()], "an item given as it already is didn't change");
+        let w = write(&place, Edit::Apply { changes: vec![], remove: vec!["t2".into(), "t9".into()] }, "codex").unwrap();
+        assert_eq!((w.changed.len(), w.removed, w.unknown), (0, vec!["t2".to_string()], vec!["t9".to_string()]));
         let path = file(&k).unwrap();
         // written whole: no temp file left next to it
         let names: Vec<String> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.contains(&k)).collect();

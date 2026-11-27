@@ -223,7 +223,8 @@ function ActivityBar() {
   // The To do list of the focused project (or the newest one): a dot while something waits on the user.
   const todoFocus = useConnections((s) => s.focusProjectId);
   useEffect(() => { void useTodos.getState().load(todoFocus); }, [todoFocus]);
-  const waitingOnYou = useTodos((s) => s.list?.items.filter((i) => i.group === "waiting_on_you").length ?? 0);
+  // (not while the To do list is off: agents don't keep it then, so what it says may be old)
+  const waitingOnYou = useTodos((s) => (s.enabled ? s.list?.items.filter((i) => i.group === "waiting_on_you").length ?? 0 : 0));
   const item = (v: SidebarView, icon: ReactNode, title: string) => (
     <button
       data-tour={`sidebar-${v}`}

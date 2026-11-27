@@ -339,6 +339,13 @@ agents); every change sends `devcat://todos` and the sidebar (`src/features/todo
 valid JSON is moved aside on the next write, never overwritten. Like memory, it's desktop only: not in the phone
 dispatcher.
 
+It is off until the user turns it on in the To do panel (`todos::enabled`, one switch for every project, in
+`<data>/todos/.settings.json`, read on each use because `devcat mcp` is another process): keeping the list costs an
+agent tokens. Off, no agent is offered the tools (`tools::for_scope`, `for_agent`), a tool an agent still holds
+refuses to run, and `devcat mcp` says nothing about the list. Anything new that offers or mentions the list to an
+agent checks the switch too. `todo_write` answers with what it changed, never the whole list: every answer stays in
+the agent's context.
+
 ## Rooms
 
 Rooms (`crates/rooms`, `src-tauri/src/rooms.rs`, `docs/rooms-architecture.md`) are for sharing with *other people*,

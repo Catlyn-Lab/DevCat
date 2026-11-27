@@ -1,6 +1,6 @@
 //! `todo_write` and `todo_list`: the To do list (`mod.rs`) as tools, built into the DevCat Agent
 //! and served by `devcat mcp`, so every agent keeps the same list for the project it works in.
-use super::{Change, Edit, Group, Item, TodoList};
+use super::{Change, Edit, Group, Item, TodoList, Written};
 use crate::agent_tools::Scope;
 use crate::memory::{Place, place_for};
 use async_trait::async_trait;
@@ -36,22 +36,28 @@ pub const MCP_NAMES: Names = Names { write: "todo_write", list: "todo_list" };
 /// with two tools of one name is refused by the model provider ("Tool names must be unique").
 pub const AGENT_NAMES: Names = Names { write: "project_todo_write", list: "project_todo_list" };
 
-/// The To do tools for an agent working in `scope`, served over `devcat mcp`.
+/// The To do tools for an agent working in `scope`, served over `devcat mcp`: none while the
+/// To do list is off (`super::enabled`, the default).
 pub fn for_scope(scope: &Scope, origin: &str) -> Vec<Arc<dyn Tool>> {
-    named(scope, origin, MCP_NAMES)
+    named(scope, origin, MCP_NAMES, super::enabled())
 }
 
-/// The To do tools for the DevCat Agent working in `scope` ([`AGENT_NAMES`]).
+/// The To do tools for the DevCat Agent working in `scope` ([`AGENT_NAMES`]): none while it's off.
 pub fn for_agent(scope: &Scope) -> Vec<Arc<dyn Tool>> {
-    named(scope, "devcat-agent", AGENT_NAMES)
+    named(scope, "devcat-agent", AGENT_NAMES, super::enabled())
 }
 
-fn named(scope: &Scope, origin: &str, names: Names) -> Vec<Arc<dyn Tool>> {
+fn named(scope: &Scope, origin: &str, names: Names, on: bool) -> Vec<Arc<dyn Tool>> {
+    if !on {
+        return vec![];
+    }
     let ctx = Arc::new(Ctx { here: place_for(scope).filter(|p| *p != Place::Global), origin: origin.to_string(), names });
     vec![Arc::new(TodoWrite(ctx.clone())), Arc::new(TodoListTool(ctx))]
 }
 
 const NO_PLACE: &str = "The To do list belongs to a project: this folder isn't a project or repository DevCat knows. Work from the project's folder.";
+/// A tool an agent still holds after the user turned the list off (its session started before).
+const OFF: &str = "The user turned the To do list off in DevCat: don't keep it for now.";
 
 fn group_names() -> Vec<&'static str> {
     Group::ALL.iter().map(|g| g.name()).collect()
@@ -161,6 +167,48 @@ pub fn render(list: &TodoList, only: Option<Group>) -> String {
     out.trim_end().to_string()
 }
 
+/// What `todo_write` answers: the items the write added or changed (with their ids), what it took
+/// off, and how many each group holds now. Not the whole list: an agent changes the list many times
+/// in a session, and every answer stays in its context for the rest of it. `named` are the ids the
+/// call gave, to say which of them were already as given.
+fn written(w: &Written, named: &[String], list_tool: &str) -> String {
+    let list = &w.list;
+    let mut out = format!("To do for {}: {} added or changed, {} removed.", list.label, w.changed.len(), w.removed.len());
+    if list.items.is_empty() {
+        out.push_str("\n\nThe list is empty.");
+        return out;
+    }
+    if !w.changed.is_empty() {
+        out.push_str(&format!(" Only those are shown here; `{list_tool}` reads the whole list."));
+    }
+    out.push('\n');
+    let mut counts = vec![];
+    for g in Group::ALL {
+        let all = list.items.iter().filter(|i| i.group == g).count();
+        if all > 0 {
+            counts.push(format!("{} {all}", g.label()));
+        }
+        let items: Vec<&Item> = list.items.iter().filter(|i| i.group == g && w.changed.contains(&i.id)).collect();
+        if items.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n{} ({} of {all})\n", g.label(), items.len()));
+        for i in items {
+            out.push_str(&item_line(i));
+            out.push('\n');
+        }
+    }
+    if !w.removed.is_empty() {
+        out.push_str(&format!("\nRemoved: {}\n", w.removed.join(", ")));
+    }
+    let same: Vec<&str> = named.iter().map(String::as_str).filter(|id| !w.changed.iter().any(|c| c.as_str() == *id) && list.items.iter().any(|i| i.id == *id)).collect();
+    if !same.is_empty() {
+        out.push_str(&format!("\nAlready as given, not changed: {}\n", same.join(", ")));
+    }
+    out.push_str(&format!("\nThe list now: {}.", counts.join(", ")));
+    out
+}
+
 // ---------- todo_write
 
 struct TodoWrite(Arc<Ctx>);
@@ -170,7 +218,7 @@ impl Tool for TodoWrite {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.0.names.write.into(),
-            description: format!("Keep the user's To do list for this project current, in DevCat: what's running, what's next, what waits on someone else, what waits on the user, and what's done. It outlives your session (another agent, or you after a restart, picks it up with `{}`) and the user watches it in DevCat's To do panel. Update it as you work: add tasks when you plan, move one to running when you start it, to waiting_on_others / waiting_on_you when it's blocked (say on whom in `waiting_on`), to done when it's finished; add PR, issue or file links. `items` adds or updates items: an item with an `id` the list has changes only the fields you give; without an `id` (or a new one) it's added, with `text`. `remove` deletes items by id. `replace: true` makes `items` the whole list. Returns the list with the ids.", self.0.names.list),
+            description: format!("Keep the user's To do list for this project current, in DevCat: what's running, what's next, what waits on someone else, what waits on the user, and what's done. It outlives your session (another agent, or you after a restart, picks it up with `{}`) and the user watches it in DevCat's To do panel. Update it as you work: add tasks when you plan, move one to running when you start it, to waiting_on_others / waiting_on_you when it's blocked (say on whom in `waiting_on`), to done when it's finished; add PR, issue or file links. `items` adds or updates items: an item with an `id` the list has changes only the fields you give; without an `id` (or a new one) it's added, with `text`. `remove` deletes items by id. `replace: true` makes `items` the whole list. Answers with the items it added or changed (with their ids) and each group's count, not the whole list.", self.0.names.list),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -209,11 +257,16 @@ impl Tool for TodoWrite {
         }
     }
     async fn run(&self, input: Value, _: &ToolCtx) -> ToolOutput {
+        if !super::enabled() {
+            return ToolOutput::err(OFF);
+        }
         let Some(place) = self.0.here.clone() else { return ToolOutput::err(NO_PLACE) };
         let edit = match edit(&input) {
             Ok(e) => e,
             Err(e) => return ToolOutput::err(e),
         };
+        let (Edit::Replace(changes) | Edit::Apply { changes, .. }) = &edit;
+        let named: Vec<String> = changes.iter().filter_map(|c| c.id.as_deref().map(str::trim).filter(|id| !id.is_empty()).map(String::from)).collect();
         match super::write(&place, edit, &self.0.origin) {
             Ok(w) => {
                 let mut out = String::new();
@@ -223,7 +276,7 @@ impl Tool for TodoWrite {
                 if !w.unknown.is_empty() {
                     out.push_str(&format!("Not on the list (nothing removed): {}\n", w.unknown.join(", ")));
                 }
-                out.push_str(&render(&w.list, None));
+                out.push_str(&written(&w, &named, self.0.names.list));
                 ToolOutput::ok(out)
             }
             Err(e) => ToolOutput::err(e.to_string()),
@@ -254,6 +307,9 @@ impl Tool for TodoListTool {
         str_field(input, &["group"]).unwrap_or("").to_string()
     }
     async fn run(&self, input: Value, _: &ToolCtx) -> ToolOutput {
+        if !super::enabled() {
+            return ToolOutput::err(OFF);
+        }
         let Some(place) = self.0.here.clone() else { return ToolOutput::err(NO_PLACE) };
         let only = match str_field(&input, &["group"]).map(str::trim).filter(|g| !g.is_empty()) {
             None => None,
@@ -283,6 +339,7 @@ mod tests {
 
     #[test]
     fn the_devcat_agent_gets_names_its_own_tools_dont_have() {
+        super::super::tests::on();
         let standard: Vec<String> = devcat_harness::tools::Registry::standard().specs().into_iter().map(|s| s.name).collect();
         let agent: Vec<String> = for_agent(&Scope::default()).iter().map(|t| t.spec().name).collect();
         assert_eq!(agent, ["project_todo_write", "project_todo_list"]);
@@ -314,7 +371,8 @@ mod tests {
 
     #[tokio::test]
     async fn one_agent_writes_another_reads() {
-        super::super::tests::data();
+        assert!(named(&Scope::default(), "codex", MCP_NAMES, false).is_empty(), "off: no agent gets the tools");
+        super::super::tests::on();
         let dir = std::env::temp_dir().join(format!("devcat-todo-repo-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let scope = Scope::folder(&dir.join("src"));
@@ -325,13 +383,24 @@ mod tests {
             .run(json!({ "items": [{ "text": "Port the ledger API", "group": "running", "links": ["https://github.com/o/r/pull/7"] }, { "text": "Ask Pete about the fx rates", "group": "waiting_on_others", "waiting_on": "Pete" }] }), &ctx())
             .await;
         assert!(!out.is_error, "{}", out.content);
-        assert!(out.content.contains("Running (1)\n- [t1] Port the ledger API · claude-code · https://github.com/o/r/pull/7"), "{}", out.content);
+        assert!(out.content.contains("Running (1 of 1)\n- [t1] Port the ledger API · claude-code · https://github.com/o/r/pull/7"), "{}", out.content);
         assert!(out.content.contains("[t2] Ask Pete about the fx rates · waiting on Pete"), "{}", out.content);
 
         let read = tool(&codex, "todo_list").run(json!({}), &ctx()).await;
         assert!(read.content.contains("Port the ledger API") && read.content.contains("Waiting on others (1)"), "{}", read.content);
         let moved = tool(&codex, "todo_write").run(json!({ "items": [{ "id": "t1", "group": "done" }], "remove": ["t5"] }), &ctx()).await;
-        assert!(moved.content.contains("Not on the list (nothing removed): t5") && moved.content.contains("Done (1)"), "{}", moved.content);
+        assert!(moved.content.contains("Not on the list (nothing removed): t5") && moved.content.contains("Done (1 of 1)\n- [t1]"), "{}", moved.content);
+        // the answer is what changed and the counts, not the whole list
+        assert!(moved.content.contains("1 added or changed, 0 removed. Only those are shown here; `todo_list` reads the whole list."), "{}", moved.content);
+        assert!(!moved.content.contains("[t2]") && moved.content.ends_with("The list now: Waiting on others 1, Done 1."), "{}", moved.content);
+        let same = tool(&codex, "todo_write").run(json!({ "items": [{ "id": "t1", "group": "done" }, { "text": "Write the notes" }], "remove": ["t2"] }), &ctx()).await;
+        assert!(same.content.contains("1 added or changed, 1 removed.") && same.content.contains("Next (1 of 1)\n- [t3] Write the notes · codex"), "{}", same.content);
+        assert!(same.content.contains("Removed: t2\n") && same.content.contains("Already as given, not changed: t1\n") && !same.content.contains("[t1]"), "{}", same.content);
+        let long: Vec<Value> = (0..40).map(|n| json!({ "text": format!("Task {n} with a line of text about as long as the ones agents write in a real project list") })).collect();
+        tool(&codex, "todo_write").run(json!({ "items": long }), &ctx()).await;
+        let one = tool(&codex, "todo_write").run(json!({ "items": [{ "id": "t10", "group": "running" }] }), &ctx()).await;
+        let whole = tool(&codex, "todo_list").run(json!({}), &ctx()).await;
+        assert!(one.content.len() < 700 && whole.content.len() > 5 * one.content.len(), "{} vs {}", one.content.len(), whole.content.len());
         let done = tool(&codex, "todo_list").run(json!({ "group": "done" }), &ctx()).await;
         assert!(done.content.contains("[t1]") && !done.content.contains("[t2]"), "{}", done.content);
         assert!(tool(&codex, "todo_list").run(json!({ "group": "later" }), &ctx()).await.is_error);

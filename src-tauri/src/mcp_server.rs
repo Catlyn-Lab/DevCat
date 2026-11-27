@@ -439,7 +439,8 @@ fn instructions(server: &Server) -> String {
     let brief = crate::memory::brief(crate::memory::place_for(&server.scope).as_ref(), claude_own.as_deref());
     let rooms = if crate::rooms_tools::allowed_anywhere() { ROOMS } else { "" };
     let delegate = if server.scope.unattended { String::new() } else { delegating(&crate::ai::delegates().into_iter().map(|p| p.name).collect::<Vec<_>>()) };
-    let todo = if server.scope.unattended { "" } else { TODO };
+    // nothing about the To do list while it's off (the default): its tools aren't offered either
+    let todo = if server.scope.unattended || !crate::todos::enabled() { "" } else { TODO };
     // first: agents cut long instructions (Claude Code does), and the brief and connection list run long
     format!("{delegate}{brief}{todo}\n# Connections (DevCat)\n{}{rooms}", connections(&server.scope))
 }
@@ -539,6 +540,7 @@ mod tests {
     #[tokio::test]
     async fn answers_the_handshake_and_unknown_methods() {
         crate::memory::tests::data();
+        crate::todos::tests::on();
         let server = Server::new(Scope { mcp: true, ..Scope::default() }, None);
         let init = handle(&server, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26", "clientInfo": { "name": "codex-mcp-client" } } })).await.unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
@@ -562,6 +564,7 @@ mod tests {
     #[tokio::test]
     async fn each_connections_ai_access_is_enforced_and_every_call_logged() {
         crate::secrets::memory_only();
+        crate::todos::tests::on();
         crate::memory::tests::data();
         crate::mcp_audit::tests::dir();
         let data = std::env::temp_dir().join(format!("devcat-mcp-access-{}", uuid::Uuid::new_v4()));

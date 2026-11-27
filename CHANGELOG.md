@@ -12,6 +12,12 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
 
 ## Unreleased
 
+- **To do list: off until you turn it on** (#254): agents keep To do lists only when you turn that on. After this
+  update it is off, also where your agents were keeping a list: turn it on again in the To do panel (**Agents keep
+  To do lists**, or **Turn on** in the empty panel; one switch for every project). The lists already written stay. Keeping the list costs your agents
+  tokens, so while it is off they get no To do tools and DevCat tells them nothing about it; they get the tools from
+  their next session after you turn it on. `todo_write` now answers with what changed instead of the whole list.
+
 ## 0.35.0 - 2026-11-28
 
 - **Rename tabs** (#257): double-click a tab, or right-click it → **Rename tab**, to give a chat, terminal or any other tab
