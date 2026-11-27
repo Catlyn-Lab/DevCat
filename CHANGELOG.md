@@ -23,8 +23,8 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
   shows it for sessions of 100K and more, so you see what resuming one costs.
 - **Shorter answers from DevCat's tools, so agents spend fewer tokens** (#259): a long `db_query` answer stops at a
   row and says how many rows it showed; `db_schema` of a large database lists the tables' names and asks for one
-  table; `k8s_logs` and `docker_logs` keep the newest lines of a long log and take `contains` to return only the
-  lines with a text; `k8s_get` leaves out the copy of the last applied manifest; `k8s_overview` shows the 15 newest
+  table; `k8s_logs` and `docker_logs` keep the newest lines of a long log, and take `contains` to return only the
+  lines with a text and `skip` to read further back; `k8s_get` leaves out the copy of the last applied manifest; `k8s_overview` shows the 15 newest
   warnings as one line each.
 - **Delegating to other models: large jobs only** (#259): with models allowed for `agent_delegate`, agents were told
   to delegate by default, even small work. They are now told to hand over large mechanical code work (a module or

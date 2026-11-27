@@ -1,7 +1,7 @@
 // Past Claude Code sessions for the workspace folder (from ~/.claude/projects), newest first.
 import { homeDir, join } from "@tauri-apps/api/path";
 import clsx from "clsx";
-import { AlertTriangle, Copy, FileText, GitBranch, MessageSquare, Pencil, SquareArrowOutUpRight, X } from "lucide-react";
+import { AlertTriangle, Copy, FileText, Gauge, GitBranch, MessageSquare, Pencil, SquareArrowOutUpRight, X } from "lucide-react";
 import { memo, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { toast } from "sonner";
 import { Spinner } from "../../../components/ui";
@@ -184,7 +184,7 @@ const SessionRow = memo(function SessionRow({ s, now, active, onOpen, onMenu }: 
           <span className="inline-flex min-w-0 items-center gap-0.5 truncate"><GitBranch className="size-2.5 shrink-0" /><span className="truncate">{s.gitBranch}</span></span>
         )}
         {context != null && (
-          <span className={clsx("shrink-0 tabular-nums", context >= LARGE_CONTEXT && "text-warn")} title={contextHint(context)}>{fmtTokens(context)} context</span>
+          <span className={clsx("inline-flex shrink-0 items-center gap-0.5 tabular-nums", context >= LARGE_CONTEXT && "text-warn")} title={contextHint(context)}><Gauge className="size-2.5" />{fmtTokens(context)}</span>
         )}
         {cost && <span className="ml-auto shrink-0 font-mono">{cost}</span>}
       </div>

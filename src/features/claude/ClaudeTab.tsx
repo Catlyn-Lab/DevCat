@@ -247,7 +247,10 @@ const CONTEXT_REFRESH_MS = 15_000;
 
 /** How much the session's context holds, next to the session id: Claude reads all of it again with
  *  every step, so a session that grew large costs more per step than a new one. Asked while the tab
- *  shows and when Claude stops working; the backend reads only the end of the transcript. */
+ *  shows and when Claude stops working; the backend reads only the end of the transcript.
+ *  The tab's Claude may have moved on to another session (/clear, /resume) that the tab doesn't know
+ *  yet: the chip follows it by the folder's newest session, but only while this is the folder's one
+ *  Claude tab. With two, the newest session may be the other tab's, so each shows its own. */
 function ContextChip({ tabId, cwd, visible }: { tabId: string; cwd: string; visible: boolean }) {
   const sid = useClaude((s) => s.tabs[tabId]?.sessionId ?? null);
   const working = useTabActivity(tabId).working;
@@ -258,9 +261,10 @@ function ContextChip({ tabId, cwd, visible }: { tabId: string; cwd: string; visi
     const read = () => {
       const tabs = useClaude.getState().tabs;
       const launchedAt = tabs[tabId]?.launchedAt;
-      // as detectSession: the folder's newest session since the launch that no other tab is on
-      const others = Object.entries(tabs).flatMap(([id, t]) => (id !== tabId && t.sessionId ? [t.sessionId] : []));
-      void api.claudeContext(cwd, sid, launchedAt ? launchedAt - 2000 : null, others).then((n) => { if (!gone) setTokens(n ?? null); }).catch(() => {});
+      const others = Object.entries(tabs).filter(([id, t]) => id !== tabId && t.isClaude);
+      const alone = !others.some(([, t]) => t.cwd === cwd);
+      const taken = others.flatMap(([, t]) => (t.sessionId ? [t.sessionId] : []));
+      void api.claudeContext(cwd, sid, alone && launchedAt ? launchedAt - 2000 : null, taken).then((n) => { if (!gone) setTokens(n ?? null); }).catch(() => {});
     };
     read();
     const timer = window.setInterval(read, CONTEXT_REFRESH_MS);

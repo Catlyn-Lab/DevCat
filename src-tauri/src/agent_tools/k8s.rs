@@ -143,16 +143,22 @@ fn brief_warnings(overview: &mut Value) {
     }
 }
 
-/// One warning event: when, what it is about, the reason and the start of the message.
+/// One warning event: when, what it is about, the reason and the start of the message (whichever
+/// of them the event has).
 fn warning_line(e: &Value) -> String {
     let about = &e["involvedObject"];
-    let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
-    let when = [&e["lastTimestamp"], &e["eventTime"], &e["metadata"]["creationTimestamp"]].into_iter().find_map(Value::as_str).unwrap_or_default();
-    let ns = about["namespace"].as_str().map(|n| format!("{n}/")).unwrap_or_default();
+    let s = |v: &Value| v.as_str().unwrap_or_default().trim().to_string();
+    let when = [&e["lastTimestamp"], &e["eventTime"], &e["metadata"]["creationTimestamp"]].into_iter().find_map(Value::as_str).unwrap_or_default().to_string();
+    let name = match (s(&about["namespace"]), s(&about["name"])) {
+        (ns, name) if !ns.is_empty() && !name.is_empty() => format!("{ns}/{name}"),
+        (ns, name) => format!("{ns}{name}"),
+    };
+    let object = [s(&about["kind"]), name].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ");
     let message: String = s(&e["message"]).split_whitespace().collect::<Vec<_>>().join(" ");
     let message = if message.chars().count() > 240 { format!("{}…", message.chars().take(240).collect::<String>()) } else { message };
     let times = e["count"].as_u64().filter(|n| *n > 1).map(|n| format!(" (x{n})")).unwrap_or_default();
-    format!("{when}  {} {ns}{}  {}: {message}{times}", s(&about["kind"]), s(&about["name"]), s(&e["reason"])).trim().to_string()
+    let what = [s(&e["reason"]), message].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(": ");
+    format!("{}{times}", [when, object, what].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  "))
 }
 
 // ---------- k8s_helm
@@ -377,6 +383,8 @@ mod tests {
         assert_eq!(lines[0], "2026-11-28T00:00:00Z  Pod shop/api-1  BackOff: Back-off restarting failed container");
         assert_eq!(lines[1], "2026-11-28T00:00:00Z  Pod shop/api-2  BackOff: Back-off restarting failed container (x2)");
         assert!(o["warningsNotShown"].as_str().unwrap().starts_with("25 older ones"), "{o}");
+        assert_eq!(warning_line(&json!({ "message": "only this", "involvedObject": { "name": "node-1" } })), "node-1  only this");
+        assert_eq!(warning_line(&json!({})), "");
         let mut few = json!({ "warnings": [event(1)] });
         brief_warnings(&mut few);
         assert!(few.get("warningsNotShown").is_none() && few["warnings"].as_array().unwrap().len() == 1);

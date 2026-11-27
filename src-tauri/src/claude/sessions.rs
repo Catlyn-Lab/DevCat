@@ -656,6 +656,12 @@ mod tests {
         write_jsonl(&path, &[prompt]);
         assert_eq!(context_tokens(&path), None, "nothing sent yet");
         assert_eq!(context_tokens(&root.join("gone.jsonl")), None);
+        // a long transcript: only its end is read, and the read starts inside the big line
+        let big = serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"x".repeat(CONTEXT_TAIL as usize + 100_000)}]}});
+        write_jsonl(&path, &[sent(1, 1, 1, false), big.clone(), sent(2, 2, 2, false)]);
+        assert_eq!(context_tokens(&path), Some(6));
+        write_jsonl(&path, &[sent(1, 1, 1, false), big]);
+        assert_eq!(context_tokens(&path), None, "the last request is further back than the end that is read");
         // a read that starts inside a line
         let lines = [r#"cache_read_input_tokens":7,"usage":1}}}"#.to_string(), sent(1, 2, 3, false).to_string()];
         assert_eq!(context_of(lines.iter()), Some(6));

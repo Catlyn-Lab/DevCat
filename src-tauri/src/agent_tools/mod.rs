@@ -432,7 +432,7 @@ impl Tool for DbSchema {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "db_schema".into(),
-            description: "Read the structure of a database connection: without `table`, every table with its columns (types, primary keys) and the views; with `table`, that table's columns, indexes and foreign keys. For SQL databases and MongoDB.".into(),
+            description: "Read the structure of a database connection: without `table`, every table with its columns (types, primary keys) and the views, or for a database too large for that the tables' names with how many columns each has; with `table`, that table's columns, indexes and foreign keys. For SQL databases and MongoDB.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -683,8 +683,17 @@ fn format_result(r: &QueryResult) -> String {
             out.push(line);
         }
         let n = r.rows.len();
-        let cut = if shown < n { format!(", the first {shown} shown because the answer was getting long: select fewer columns, filter, or page with LIMIT / OFFSET (`db_export` writes every row to a file)") } else { String::new() };
-        out.push(format!("({n} row{}{}{cut}, {} ms)", if n == 1 { "" } else { "s" }, if r.truncated { ", more not shown: add a LIMIT / filter or raise max_rows" } else { "" }, r.elapsed_ms));
+        let rows = format!("{n} row{}", if n == 1 { "" } else { "s" });
+        out.push(match (shown < n, r.truncated) {
+            // raising max_rows wouldn't help an answer that is already too long
+            (true, more) => format!(
+                "({rows}{}, the first {shown} shown because the answer was getting long: select fewer columns, filter, or read it in pages (`db_export` writes every row to a file), {} ms)",
+                if more { " and more" } else { "" },
+                r.elapsed_ms
+            ),
+            (false, true) => format!("({rows}, more not shown: add a LIMIT / filter or raise max_rows, {} ms)", r.elapsed_ms),
+            (false, false) => format!("({rows}, {} ms)", r.elapsed_ms),
+        });
     } else if let Some(n) = r.rows_affected {
         out.push(format!("{n} row{} affected ({} ms)", if n == 1 { "" } else { "s" }, r.elapsed_ms));
     }
@@ -1206,18 +1215,23 @@ fn slim(v: &mut Value) {
 }
 
 /// A log as an agent reads it: only the lines with `contains` when it is given (any letter case),
-/// and of a log longer than [`REPLY_BUDGET`] the newest lines that fit, under a line saying how
-/// many older ones were left out. The newest stay because a log is read from its end; the
-/// harness's own cut keeps the oldest two thirds.
-fn log_reply(text: &str, contains: Option<&str>) -> String {
+/// without the newest `skip` of them, and of what is then longer than [`REPLY_BUDGET`] the newest
+/// lines that fit, under a line saying how many older ones were left out and the `skip` that
+/// reads them. The newest stay because a log is read from its end (the harness's own cut keeps
+/// the oldest two thirds); `skip` is how an agent pages back, to the lines around a match too.
+fn log_reply(text: &str, contains: Option<&str>, skip: usize) -> String {
     let needle = contains.map(str::to_lowercase).filter(|n| !n.is_empty());
-    let lines: Vec<&str> = text.lines().filter(|l| needle.as_ref().is_none_or(|n| l.to_lowercase().contains(n.as_str()))).collect();
+    let mut lines: Vec<&str> = text.lines().filter(|l| needle.as_ref().is_none_or(|n| l.to_lowercase().contains(n.as_str()))).collect();
     if lines.iter().all(|l| l.trim().is_empty()) {
         return match &needle {
             Some(_) => format!("(no log line contains \"{}\")", contains.unwrap_or_default()),
             None => "(no log lines)".into(),
         };
     }
+    if skip >= lines.len() {
+        return format!("(no lines before the newest {skip}: these were {} lines. Ask for more lines to read further back.)", lines.len());
+    }
+    lines.truncate(lines.len() - skip);
     let (mut from, mut used) = (lines.len(), 0);
     while from > 0 && (from == lines.len() || used + lines[from - 1].len() < REPLY_BUDGET) {
         from -= 1;
@@ -1227,7 +1241,11 @@ fn log_reply(text: &str, contains: Option<&str>) -> String {
     if from == 0 {
         return body;
     }
-    format!("[{from} older line{} not shown because the answer was getting long: narrow it with `contains`, or ask for fewer lines]\n{body}", if from == 1 { "" } else { "s" })
+    format!(
+        "[{from} older line{} not shown because the answer was getting long: `skip: {}` reads the ones before these, `contains` only the lines with a text]\n{body}",
+        if from == 1 { "" } else { "s" },
+        skip + lines.len() - from
+    )
 }
 
 /// Secret data stays in the cluster: only the keys and sizes are shown.
@@ -1255,7 +1273,7 @@ impl Tool for K8sLogs {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "k8s_logs".into(),
-            description: "Read the recent logs of a pod in one of the user's cluster connections (the last `tail_lines` lines, default 200, at most 5000). `contains` keeps only the lines with that text (any letter case): to find an error further back, give it with more `tail_lines` instead of reading them all. A long answer keeps its newest lines and says how many older ones it left out. `previous: true` reads the container's previous run (after a crash).".into(),
+            description: "Read the recent logs of a pod in one of the user's cluster connections (the last `tail_lines` lines, default 200, at most 5000). `contains` keeps only the lines with that text (any letter case): to find an error further back, give it with more `tail_lines` instead of reading them all. A long answer keeps its newest lines and says how many older ones it left out; `skip` leaves the newest lines out, to read the ones before (around a line `contains` found, too). `previous: true` reads the container's previous run (after a crash).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1265,6 +1283,7 @@ impl Tool for K8sLogs {
                     "container": { "type": "string", "description": "Needed when the pod has several containers" },
                     "tail_lines": { "type": "integer" },
                     "contains": { "type": "string", "description": "Only the lines with this text" },
+                    "skip": { "type": "integer", "description": "Leave out the newest N lines, to read further back" },
                     "previous": { "type": "boolean" }
                 },
                 "required": ["connection", "namespace", "pod"]
@@ -1298,7 +1317,7 @@ impl Tool for K8sLogs {
             ..LogParams::default()
         };
         match Api::<Pod>::namespaced(conn.client.clone(), &ns).logs(&pod, &lp).await {
-            Ok(text) => ToolOutput::ok(log_reply(&text, s("contains").as_deref())),
+            Ok(text) => ToolOutput::ok(log_reply(&text, s("contains").as_deref(), input.get("skip").and_then(Value::as_u64).unwrap_or(0) as usize)),
             Err(e) => ToolOutput::err(e.to_string()),
         }
     }
@@ -1317,7 +1336,10 @@ mod tests {
         assert!(text.len() < REPLY_BUDGET + 600, "{}", text.len());
         let shown = text.lines().count() - 2;
         assert!(shown > 40 && shown < 500 && text.lines().nth(shown).unwrap().starts_with(&format!("{} | ", shown - 1)), "{shown}");
-        assert!(text.ends_with(&format!("(500 rows, the first {shown} shown because the answer was getting long: select fewer columns, filter, or page with LIMIT / OFFSET (`db_export` writes every row to a file), 3 ms)")), "{}", &text[text.len() - 220..]);
+        assert!(text.ends_with(&format!("(500 rows, the first {shown} shown because the answer was getting long: select fewer columns, filter, or read it in pages (`db_export` writes every row to a file), 3 ms)")), "{}", &text[text.len() - 220..]);
+        let capped = format_result(&QueryResult { truncated: true, ..r.clone() });
+        assert!(capped.contains(&format!("(500 rows and more, the first {shown} shown")) && !capped.contains("raise max_rows"), "{}", &capped[capped.len() - 220..]);
+        assert_eq!(format_result(&QueryResult { columns: r.columns.clone(), ..Default::default() }), "id | note\n(0 rows, 0 ms)");
         let one = QueryResult { columns: r.columns.clone(), rows: vec![vec![json!(1), json!("y".repeat(300))]; 60], ..Default::default() };
         assert!(format_result(&one).lines().count() > 30, "wide rows still show, fewer of them");
 
@@ -1332,14 +1354,26 @@ mod tests {
 
         // a log: the newest lines, or only the ones asked for
         let log: String = (0..3000).map(|n| format!("2026-11-28T00:00:00Z line {n} {}\n", if n % 1000 == 7 { "ERROR boom" } else { "ok and a few more words to make it a line" })).collect();
-        let tail = log_reply(&log, None);
+        let tail = log_reply(&log, None, 0);
         assert!(tail.len() < REPLY_BUDGET + 200 && tail.ends_with("line 2999 ok and a few more words to make it a line"), "{}", tail.len());
         let left: usize = tail.lines().next().unwrap().trim_start_matches('[').split(' ').next().unwrap().parse().unwrap();
         assert_eq!(left + tail.lines().count() - 1, 3000, "{}", tail.lines().next().unwrap());
-        assert_eq!(log_reply(&log, Some("error")).lines().count(), 3, "only the lines asked for, any letter case");
-        assert_eq!(log_reply("a\nb\n", None), "a\nb");
-        assert_eq!(log_reply("a\nb\n", Some("zzz")), "(no log line contains \"zzz\")");
-        assert_eq!(log_reply("\n", None), "(no log lines)");
+        // paging back with the `skip` the answer names: the lines right before, none twice
+        let shown = tail.lines().count() - 1;
+        assert!(tail.lines().next().unwrap().contains(&format!("`skip: {shown}` reads the ones before these")), "{}", tail.lines().next().unwrap());
+        let before = log_reply(&log, None, shown);
+        assert!(before.ends_with(&format!("line {} ok and a few more words to make it a line", 2999 - shown)) && before.lines().next().unwrap().contains(&format!("`skip: {}`", shown + before.lines().count() - 1)), "{}", before.lines().next().unwrap());
+        assert_eq!(log_reply("a\nb\nc\n", None, 1), "a\nb");
+        assert_eq!(log_reply("a\nb\n", None, 2), "(no lines before the newest 2: these were 2 lines. Ask for more lines to read further back.)");
+        assert_eq!(log_reply(&log, Some("error"), 0).lines().count(), 3, "only the lines asked for, any letter case");
+        assert_eq!(log_reply(&log, Some("error"), 1).lines().count(), 2);
+        assert_eq!(log_reply("a\nb\n", None, 0), "a\nb");
+        assert_eq!(log_reply("a\r\nb\r\n", None, 0), "a\nb", "Windows line ends");
+        assert_eq!(log_reply("a\nb\n", Some("zzz"), 0), "(no log line contains \"zzz\")");
+        assert_eq!(log_reply("\n", None, 0), "(no log lines)");
+        // one line longer than the whole budget still shows, alone
+        let wide = format!("old\n{}", "w".repeat(REPLY_BUDGET + 50));
+        assert!(log_reply(&wide, None, 0).starts_with("[1 older line not shown") && log_reply(&wide, None, 0).ends_with("www"));
 
         // an object read whole: without what repeats it
         let mut dep = json!({ "kind": "Deployment", "metadata": { "name": "api", "managedFields": [{ "manager": "kubectl" }], "annotations": { "kubectl.kubernetes.io/last-applied-configuration": "{...}", "note": "kept" } }, "spec": { "replicas": 2 } });
