@@ -21,6 +21,10 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
   `project_todo_list` in the DevCat Agent), so a restarted session or
   another agent picks the list up. Tick an item done or move it from its menu; a dot on the icon means something
   waits on you.
+- **Leave a room**: **Leave room** in a room's header, its right-click menu in the sidebar, or Room settings. The
+  owner's DevCat takes you off the member list (the others see you go, and nothing new reaches you), then your copy
+  is deleted. The owner's DevCat must be open; if it can't be reached, you can delete only your copy instead. The
+  owner can remove a room from their DevCat, as before.
 - **DevCat Agent: put the files back to before a message**: the agent saves the project's files before it changes
   them (once a turn, and again before a command that deletes or overwrites), in a store of its own that never
   touches the project's `.git`. **Restore files** on one of your messages shows which files would change, then puts

@@ -197,12 +197,29 @@ pub async fn room_join_answer(request_id: String, role: Option<Role>) -> AppResu
     Ok(())
 }
 
+/// Delete this DevCat's copy of a room without telling anyone (the owner's way out, or when the
+/// owner's DevCat can't be reached).
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn room_forget(room: String) -> AppResult<()> {
     crate::rooms_agent::stop(&room);
     node().await?.forget(&room).map_err(AppError::msg)?;
-    crate::secrets::delete(&crate::rooms_github::token_key(&room));
+    forgotten(&room);
     Ok(())
+}
+
+/// Leave a room: the owner's DevCat takes this one off the member list, then the copy here is
+/// deleted (`Node::leave`).
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn room_leave(room: String) -> AppResult<()> {
+    node().await?.leave(&room).await.map_err(AppError::msg)?;
+    crate::rooms_agent::stop(&room);
+    forgotten(&room);
+    Ok(())
+}
+
+/// What this DevCat keeps about a room outside its folder.
+fn forgotten(room: &str) {
+    crate::secrets::delete(&crate::rooms_github::token_key(room));
 }
 
 #[derive(Serialize)]
