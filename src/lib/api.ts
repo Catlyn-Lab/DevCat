@@ -40,6 +40,9 @@ export const api = {
   todosGet: (place: { key: string } | { projectId: string }) =>
     invoke<TodoList>("todos_get", { key: "key" in place ? place.key : null, projectId: "projectId" in place ? place.projectId : null }),
   todosEdit: (key: string, changes: TodoChange[], remove: string[] = []) => invoke<TodoList>("todos_edit", { key, changes, remove }),
+  // Whether agents keep the lists (off until the user turns it on): off, they get no To do tools.
+  todosEnabled: () => invoke<boolean>("todos_enabled"),
+  todosSetEnabled: (enabled: boolean) => invoke<void>("todos_set_enabled", { enabled }),
 
   // page review (Review tab). Events: "review://changed" (ReviewChanged), "review://page" (ReviewPage)
   reviewStart: (target: { url: string } | { path: string }, projectId?: string | null) =>

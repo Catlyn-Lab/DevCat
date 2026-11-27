@@ -36,17 +36,21 @@ pub const MCP_NAMES: Names = Names { write: "todo_write", list: "todo_list" };
 /// with two tools of one name is refused by the model provider ("Tool names must be unique").
 pub const AGENT_NAMES: Names = Names { write: "project_todo_write", list: "project_todo_list" };
 
-/// The To do tools for an agent working in `scope`, served over `devcat mcp`.
+/// The To do tools for an agent working in `scope`, served over `devcat mcp`: none while the
+/// To do list is off (`super::enabled`, the default).
 pub fn for_scope(scope: &Scope, origin: &str) -> Vec<Arc<dyn Tool>> {
-    named(scope, origin, MCP_NAMES)
+    named(scope, origin, MCP_NAMES, super::enabled())
 }
 
-/// The To do tools for the DevCat Agent working in `scope` ([`AGENT_NAMES`]).
+/// The To do tools for the DevCat Agent working in `scope` ([`AGENT_NAMES`]): none while it's off.
 pub fn for_agent(scope: &Scope) -> Vec<Arc<dyn Tool>> {
-    named(scope, "devcat-agent", AGENT_NAMES)
+    named(scope, "devcat-agent", AGENT_NAMES, super::enabled())
 }
 
-fn named(scope: &Scope, origin: &str, names: Names) -> Vec<Arc<dyn Tool>> {
+fn named(scope: &Scope, origin: &str, names: Names, on: bool) -> Vec<Arc<dyn Tool>> {
+    if !on {
+        return vec![];
+    }
     let ctx = Arc::new(Ctx { here: place_for(scope).filter(|p| *p != Place::Global), origin: origin.to_string(), names });
     vec![Arc::new(TodoWrite(ctx.clone())), Arc::new(TodoListTool(ctx))]
 }
@@ -327,6 +331,7 @@ mod tests {
 
     #[test]
     fn the_devcat_agent_gets_names_its_own_tools_dont_have() {
+        super::super::tests::on();
         let standard: Vec<String> = devcat_harness::tools::Registry::standard().specs().into_iter().map(|s| s.name).collect();
         let agent: Vec<String> = for_agent(&Scope::default()).iter().map(|t| t.spec().name).collect();
         assert_eq!(agent, ["project_todo_write", "project_todo_list"]);
@@ -358,7 +363,8 @@ mod tests {
 
     #[tokio::test]
     async fn one_agent_writes_another_reads() {
-        super::super::tests::data();
+        assert!(named(&Scope::default(), "codex", MCP_NAMES, false).is_empty(), "off: no agent gets the tools");
+        super::super::tests::on();
         let dir = std::env::temp_dir().join(format!("devcat-todo-repo-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let scope = Scope::folder(&dir.join("src"));

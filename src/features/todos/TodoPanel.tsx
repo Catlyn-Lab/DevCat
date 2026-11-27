@@ -1,11 +1,12 @@
 // Sidebar: the To do list agents keep for the focused project (todo_write), by group: Running,
 // Next, Waiting on others, Waiting on you, Done. Without a focused project, a picker chooses the
-// list (newest first). Tick an item done, or move it from its menu.
+// list (newest first). Tick an item done, or move it from its menu. The switch on top turns the
+// agents' side on or off (off at first): off, agents get no To do tools and the list stays as it is.
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import { ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, Circle, ExternalLink, FileText, ListChecks, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Select, Spinner } from "../../components/ui";
+import { Button, Checkbox, Select, Spinner } from "../../components/ui";
 import type { TodoGroup, TodoItem } from "../../lib/types";
 import { useConnections } from "../../store/connections";
 import { useContextMenu, type MenuItem } from "../connections/ContextMenu";
@@ -22,7 +23,8 @@ function openLink(link: string) {
 
 export default function TodoPanel() {
   const focus = useConnections((s) => s.focusProjectId);
-  const { lists, list, loaded, error, picked } = useTodos();
+  const { lists, list, loaded, error, picked, enabled } = useTodos();
+  const setEnabled = useTodos.getState().setEnabled;
   const [doneOpen, setDoneOpen] = useState(false);
   const menu = useContextMenu();
   useNow(60_000);
@@ -46,6 +48,15 @@ export default function TodoPanel() {
 
   return (
     <div className="flex h-full flex-col">
+      {loaded && (enabled || total > 0) && (
+        <div
+          className="flex min-h-9 shrink-0 flex-col justify-center border-b border-line px-3 py-1.5"
+          title="On: your coding agents get the To do tools and keep this list as they work. Off: they don't, which saves their tokens. Agents pick the change up in their next session."
+        >
+          <Checkbox label="Agents keep this list" checked={enabled} onChange={(v) => void setEnabled(v)} />
+          {!enabled && <span className="pl-[21px] text-[11px] text-faint">Off: agents don't read or update it.</span>}
+        </div>
+      )}
       {!focus && list && (
         <div className="flex h-9 shrink-0 items-center border-b border-line px-2">
           {lists.length > 1 ? (
@@ -61,6 +72,13 @@ export default function TodoPanel() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!loaded ? (
           <div className="flex justify-center p-4"><Spinner /></div>
+        ) : total === 0 && !enabled ? (
+          <div className="flex flex-col items-center gap-2 px-6 py-8 text-center text-xs text-faint">
+            <ListChecks className="size-6" />
+            <span>The To do list is off.</span>
+            <span>Turn it on and your coding agents keep a list for each project: what's running, what's next, and what waits on someone. It uses some of their tokens, and they pick it up in their next session.</span>
+            <Button variant="primary" size="sm" className="mt-1" onClick={() => void setEnabled(true)}>Turn on</Button>
+          </div>
         ) : total === 0 ? (
           <div className="flex flex-col items-center gap-2 px-6 py-8 text-center text-xs text-faint">
             <ListChecks className="size-6" />

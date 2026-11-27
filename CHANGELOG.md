@@ -17,7 +17,8 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
   current with the new `todo_write` and `todo_list` tools (`devcat mcp`; `project_todo_write` and
   `project_todo_list` in the DevCat Agent), so a restarted session or
   another agent picks the list up. Tick an item done or move it from its menu; a dot on the icon means something
-  waits on you.
+  waits on you. It is off until you turn it on in the To do panel (**Agents keep this list**): keeping the list
+  costs your agents some tokens, and they get the tools from their next session.
 - **DevCat Agent: put the files back to before a message**: the agent saves the project's files before it changes
   them (once a turn, and again before a command that deletes or overwrites), in a store of its own that never
   touches the project's `.git`. **Restore files** on one of your messages shows which files would change, then puts

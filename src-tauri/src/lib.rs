@@ -498,6 +498,8 @@ pub fn run() {
             todos::todos_lists,
             todos::todos_get,
             todos::todos_edit,
+            todos::todos_enabled,
+            todos::todos_set_enabled,
             // AI connections (providers for the AI workspace terminal)
             agent::agent_open,
             agent::agent_send,
