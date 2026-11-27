@@ -51,10 +51,10 @@ export default function TodoPanel() {
       {loaded && (enabled || total > 0) && (
         <div
           className="flex min-h-9 shrink-0 flex-col justify-center border-b border-line px-3 py-1.5"
-          title="On: your coding agents get the To do tools and keep this list as they work. Off: they don't, which saves their tokens. Agents pick the change up in their next session."
+          title="On: your coding agents get the To do tools and keep a list for each project as they work. Off: they don't, which saves their tokens. One switch for every project; agents pick it up in their next session."
         >
-          <Checkbox label="Agents keep this list" checked={enabled} onChange={(v) => void setEnabled(v)} />
-          {!enabled && <span className="pl-[21px] text-[11px] text-faint">Off: agents don't read or update it.</span>}
+          <Checkbox label="Agents keep To do lists" checked={enabled} onChange={(v) => void setEnabled(v)} />
+          {!enabled && <span className="pl-[21px] text-[11px] text-faint">Off: agents don't read or update them.</span>}
         </div>
       )}
       {!focus && list && (
@@ -76,7 +76,7 @@ export default function TodoPanel() {
           <div className="flex flex-col items-center gap-2 px-6 py-8 text-center text-xs text-faint">
             <ListChecks className="size-6" />
             <span>The To do list is off.</span>
-            <span>Turn it on and your coding agents keep a list for each project: what's running, what's next, and what waits on someone. It uses some of their tokens, and they pick it up in their next session.</span>
+            <span>Turn it on and your coding agents keep a list for each project: what's running, what's next, and what waits on someone. It uses some of their tokens, and they pick it up in their next session. One switch for every project.</span>
             <Button variant="primary" size="sm" className="mt-1" onClick={() => void setEnabled(true)}>Turn on</Button>
           </div>
         ) : total === 0 ? (
