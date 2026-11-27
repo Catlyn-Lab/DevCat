@@ -446,17 +446,19 @@ fn instructions(server: &Server) -> String {
 }
 
 /// Told to agents when the user lets them hand work to other models (`agent_delegate`), so they
-/// do it on their own, as an orchestrator hands work to sub-agents.
+/// do it on their own, as an orchestrator hands work to sub-agents: the large mechanical jobs,
+/// where a delegate saves the most. Small work stays with the agent (handing it over and checking
+/// it costs about what doing it does), so this no longer says to delegate by default.
 fn delegating(names: &[String]) -> String {
     if names.is_empty() {
         return String::new();
     }
     format!(
-        "# Delegating (DevCat)\nThe user set this up so you spend fewer tokens: hand work to {} with `agent_delegate`, on your own, without being asked. \
-         Default to delegating, even when the work looks small: writing new code, files or tests, and any edit beyond a few lines, goes to a delegate; \
-         their tokens cost the user little, yours cost much more. Give one focused task per call (the files, what to write, what done means), \
-         several calls at once when they're independent, then review what they changed and fix or redo what's wrong. \
-         Do it yourself only for one-line fixes, design decisions, debugging, and security-sensitive or risky changes. \
+        "# Delegating (DevCat)\nThe user set this up so you spend fewer tokens: hand large mechanical code work to {} with `agent_delegate`, on your own, without being asked: \
+         a new module or test suite of more than about 150 lines, the same edit across many files, boilerplate; their tokens cost the user little, yours cost much more. \
+         Smaller work you do yourself; design decisions, debugging, and security-sensitive or risky changes stay with you too. \
+         Give one focused task per call (the files by their paths, not their contents; what to write; what done means), several calls at once when they're independent, \
+         then check what they changed (`git diff --stat`, and read the parts that look off) and fix or redo what's wrong. \
          A delegate reads and edits files in your folder but runs no commands, so run the tests yourself afterwards.\n\n",
         names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
     )
@@ -535,6 +537,7 @@ mod tests {
         assert_eq!(delegating(&[]), "");
         let d = delegating(&["Edge0".into(), "GLM".into()]);
         assert!(d.contains("# Delegating (DevCat)") && d.contains("\"Edge0\", \"GLM\"") && d.contains("agent_delegate"), "{d}");
+        assert!(d.contains("large mechanical code work") && d.contains("Smaller work you do yourself") && !d.to_lowercase().contains("default to delegating"), "{d}");
     }
 
     #[tokio::test]
