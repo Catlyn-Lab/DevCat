@@ -183,6 +183,9 @@ pub fn run() {
             review::channel::add_capability(app.handle())?;
             review::set_data_dir(dir.clone());
             init_backend(dir.clone());
+            // images of reviews no note names any more (a closed review, a deleted note)
+            let notes_dir = dir.clone();
+            std::thread::spawn(move || review::commands::prune_images(&notes::NoteStore::new(notes_dir)));
             // keep awake is on from the start, unless the user turned that off
             keep_awake::start_default();
             // scheduled DevCat Agent jobs run in the app (where they're managed), not in `devcat serve`
@@ -219,6 +222,10 @@ pub fn run() {
             review::commands::review_finish,
             review::commands::review_close,
             review::commands::review_clear_data,
+            review::commands::review_image_add,
+            review::commands::review_image_remove,
+            review::commands::review_image,
+            review::commands::review_text_for,
             // keep awake
             keep_awake::keep_awake_status,
             fonts::fonts_list,
@@ -433,6 +440,7 @@ pub fn run() {
             rooms::room_join,
             rooms::room_join_answer,
             rooms::room_forget,
+            rooms::room_leave,
             rooms::room_view,
             rooms::room_board,
             rooms::room_doc_updates,

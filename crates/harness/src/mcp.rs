@@ -120,8 +120,41 @@ fn expand(s: &str) -> String {
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
 enum Transport {
-    Stdio { stdin: tokio::sync::Mutex<ChildStdin>, pending: Pending, _child: Box<Child> },
+    /// `_group`: the server's key in `GROUPS`. Declared before `_child`, so the group is killed
+    /// while the child is still unreaped: its pid (the group's id) can't be anyone else's yet.
+    Stdio { stdin: tokio::sync::Mutex<ChildStdin>, pending: Pending, _group: Group, _child: Box<Child> },
     Http { http: reqwest::Client, url: String, headers: Vec<(String, String)>, session: Mutex<Option<String>> },
+}
+
+/// The process trees of the local servers running now, so the app can end them all when it quits
+/// (`stop_all`): exiting runs no destructors, and a server that doesn't notice its stdin closing
+/// would outlive it.
+static GROUPS: Mutex<Option<HashMap<u64, crate::hooks::Tree>>> = Mutex::new(None);
+static NEXT_GROUP: AtomicU64 = AtomicU64::new(1);
+
+/// A local server's process tree, killed when the server is dropped (its chat closed).
+struct Group(u64);
+
+impl Group {
+    fn of(child: &Child) -> Group {
+        let key = NEXT_GROUP.fetch_add(1, Ordering::Relaxed);
+        GROUPS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, crate::hooks::Tree::of(child));
+        Group(key)
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        // dropping the tree kills it (outside the lock)
+        let tree = GROUPS.lock().unwrap().as_mut().and_then(|g| g.remove(&self.0));
+        drop(tree);
+    }
+}
+
+/// End every local server and what it started (the app is quitting).
+pub fn stop_all() {
+    let all = GROUPS.lock().unwrap().take();
+    drop(all);
 }
 
 /// A connected server. Dropping a local one stops its process.
@@ -187,7 +220,17 @@ impl Server {
         cmd.envs(cfg.env.iter().cloned()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        #[cfg(unix)]
+        // Its own session, so it and what it starts can be ended together: `npx foo` is npx, and
+        // the server is its child.
+        unsafe {
+            cmd.pre_exec(|| {
+                crate::tools::libc_setsid();
+                Ok(())
+            });
+        }
         let mut child = cmd.spawn().map_err(|e| format!("MCP server \"{}\": couldn't start {}: {e}", cfg.name, cfg.command))?;
+        let group = Group::of(&child);
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let pending: Pending = Arc::default();
@@ -209,7 +252,7 @@ impl Server {
             // the process ended: fail whatever is still waiting
             p2.lock().unwrap().clear();
         });
-        Ok(Transport::Stdio { stdin: tokio::sync::Mutex::new(stdin), pending, _child: Box::new(child) })
+        Ok(Transport::Stdio { stdin: tokio::sync::Mutex::new(stdin), pending, _group: group, _child: Box::new(child) })
     }
 
     async fn write_line(stdin: &tokio::sync::Mutex<ChildStdin>, msg: Value) -> Result<(), String> {

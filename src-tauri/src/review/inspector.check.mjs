@@ -268,6 +268,8 @@ const cfg = (o) => ({ origin: "http://localhost:9", review: "r1", secret: "s3cre
   const w = fakeWorld("http://localhost:9", "/");
   run(w, cfg());
   const n = () => (w.win.listeners.touchstart || []).length;
+  eq(n(), 0, "no touchstart listener before inspect is turned on");
+  w.win.__devcatReview.setInspect(true);
   eq(n(), 1, "touchstart listener while inspecting");
   w.win.__devcatReview.setInspect(false);
   eq(n(), 0, "touchstart listener removed when inspect is off");

@@ -6,7 +6,9 @@ import { toast } from "sonner";
 import { create } from "zustand";
 import { IS_MAIN_WINDOW } from "../../lib/windows";
 import { isTabVisible, openTab, useTabs } from "../../store/tabs";
-import { label, rooms, type GithubPublish, type JoinRequest, type Message, type RoomSummary } from "./api";
+import { errMsg } from "../../lib/api";
+import { confirmDialog } from "../connections/dialogs";
+import { label, rooms, type GithubPublish, type JoinRequest, type Message, type Role, type RoomSummary } from "./api";
 
 interface RoomsState {
   id: string | null;
@@ -63,6 +65,60 @@ export const useRooms = create<RoomsState>((set) => ({
 function closeRoomTabs(room: string) {
   const tabs = useTabs.getState();
   for (const t of tabs.tabs.filter((x) => x.type === "room" && x.roomId === room)) tabs.close(t.id, true);
+}
+
+/** Leave a room, after asking. A member asks the owner's DevCat to take them off the list (the
+ *  others see them go, nothing new reaches them), then the copy here is deleted; when the owner's
+ *  DevCat can't be reached, deleting only the copy here is offered. The owner, and someone already
+ *  removed, can only delete the copy here. Returns whether the room is gone from this DevCat. */
+export async function leaveRoom(r: { id: string; name: string; role: Role; removed?: boolean }): Promise<boolean> {
+  const done = async () => {
+    closeRoomTabs(r.id);
+    await useRooms.getState().refresh().catch(() => {});
+    return true;
+  };
+  const forget = async () => {
+    try {
+      await rooms.forget(r.id);
+    } catch (e) {
+      toast.error(errMsg(e));
+      return false;
+    }
+    return done();
+  };
+  if (r.role === "owner" || r.removed) {
+    const ok = await confirmDialog({
+      title: `Remove ${r.name} from this DevCat?`,
+      message: r.role === "owner"
+        ? "You own this room: the others keep their copies, but nobody can let new people in or change who's in it any more."
+        : "You were removed from this room. Your read-only copy here is deleted.",
+      confirmLabel: "Remove",
+      danger: true,
+    });
+    return ok ? forget() : false;
+  }
+  const ok = await confirmDialog({
+    title: `Leave ${r.name}?`,
+    message: "The owner's DevCat takes you off the member list: the others see you leave, and nothing new in the room reaches you. Your copy here is deleted. The owner can invite you again.",
+    confirmLabel: "Leave",
+    danger: true,
+  });
+  if (!ok) return false;
+  const asking = toast.loading(`Leaving ${r.name}: asking the owner's DevCat…`);
+  try {
+    await rooms.leave(r.id);
+    toast.success(`You left ${r.name}`, { id: asking });
+    return done();
+  } catch (e) {
+    toast.dismiss(asking);
+    const anyway = await confirmDialog({
+      title: "The owner wasn't told",
+      message: `${errMsg(e)} Delete your copy here anyway? You stay on the owner's member list until they remove you: try again while their DevCat is open to leave properly.`,
+      confirmLabel: "Delete my copy",
+      danger: true,
+    });
+    return anyway ? forget() : false;
+  }
 }
 
 const NAME_KEY = "devcat.rooms.myName";

@@ -237,7 +237,7 @@
     openTab(to);
   }
 
-  var inspect = true, hovered = null, host = null, shadow = null;
+  var inspect = false, hovered = null, host = null, shadow = null;
   var hoverBox, hoverLabel, pinLayer, hlBox, box, area, errLine, saveBtn;
   var boxTarget = null, entries = [], missingNow = [], shownPage = null;
   var queued = false, helloTimer = 0, domTimer = 0, highlighted = null;

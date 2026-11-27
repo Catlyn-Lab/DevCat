@@ -1,8 +1,9 @@
 import clsx from "clsx";
-import { ArrowRightLeft, Columns2, Copy, CopyPlus, Pin, PinOff, Rows2, Sparkle, SquareArrowOutUpRight, SquareSplitHorizontal, SquareSplitVertical, X, Zap } from "lucide-react";
+import { ArrowRightLeft, Columns2, Copy, CopyPlus, Pencil, Pin, PinOff, RotateCcw, Rows2, Sparkle, SquareArrowOutUpRight, SquareSplitHorizontal, SquareSplitVertical, X, Zap } from "lucide-react";
 import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Group, Panel, Separator, type Layout } from "react-resizable-panels";
+import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { useTabLayout } from "../../features/appearance/tabs";
 import { isPinned, pin, unpin, usePins } from "../../features/files/pins";
@@ -21,7 +22,7 @@ import { openTab, useTabs, type Side } from "../../store/tabs";
 import { isSplit, nextPane, paneIds, paneTabs, removeNode, type PaneNode } from "../../store/panes";
 import { TabContent } from "../../tabs/registry";
 import { TabIcon, tabKindLabel } from "../../tabs/TabIcon";
-import { tabConnId, tabFolder, type Tab } from "../../tabs/types";
+import { tabConnId, tabFolder, tabTitle, type Tab } from "../../tabs/types";
 import { Spin } from "../ui";
 
 // Split panes: each pane has its own tab bar and shows one of its tabs. Every tab's content is
@@ -298,6 +299,10 @@ function PaneView({ id }: { id: string }) {
   );
 }
 
+/** The tab whose name is being edited in the tab bar (Rename tab, or a double-click on it). */
+const useRenaming = create<{ id: string | null }>(() => ({ id: null }));
+const startRename = (id: string) => useRenaming.setState({ id });
+
 function TabBar({ pane }: { pane: string }) {
   const { shown, hiddenCount, firstPane, panes, drag, startDrag, tabMenu } = useContext(WorkspaceCtx);
   const allTabs = useTabs((s) => s.tabs);
@@ -305,6 +310,7 @@ function TabBar({ pane }: { pane: string }) {
   const active = useTabs((s) => s.paneActive[pane] ?? null);
   const focused = useTabs((s) => s.focusedPane === pane);
   const { activate, close } = useTabs.getState();
+  const renaming = useRenaming((s) => s.id);
   const tabs = allTabs.filter((t) => paneOf[t.id] === pane && shown.has(t.id));
   const connections = useConnections((s) => s.connections);
   const connName = (t: Tab) => { const id = tabConnId(t); return id ? connections.find((c) => c.id === id)?.name : undefined; };
@@ -341,6 +347,7 @@ function TabBar({ pane }: { pane: string }) {
             if (e.button === 0) startDrag(e, t.id);
           }}
           onContextMenu={(e) => tabMenu(e, t)}
+          onDoubleClick={() => { if (t.type !== "welcome") startRename(t.id); }}
           title={drag ? undefined : tabKindLabel(t, connName(t))}
           className={clsx(
             "group relative flex max-w-56 shrink-0 cursor-default items-center gap-2 border-r border-line pl-3 pr-1.5",
@@ -361,7 +368,9 @@ function TabBar({ pane }: { pane: string }) {
           {/* The connection's color (e.g. red for production) under its tabs. */}
           {connColor(t) && <span className="pointer-events-none absolute inset-x-2 bottom-0 h-0.5 rounded-t" style={{ background: connColor(t)! }} />}
           <TabIcon tab={t} />
-          {t.type === "claude" ? <AgentTabTitle tabId={t.id} title={t.title} /> : <span className="truncate" title={t.title}>{t.title}</span>}
+          {renaming === t.id
+            ? <TabNameInput tab={t} />
+            : t.type === "claude" ? <AgentTabTitle tabId={t.id} title={tabTitle(t)} /> : <span className="truncate" title={tabTitle(t)}>{tabTitle(t)}</span>}
           {t.dirty && <span className="size-1.5 rounded-full bg-accent" />}
           <button
             aria-label="Close tab"
@@ -395,6 +404,13 @@ function tabMenuItems(t: Tab): MenuItem[] {
   const copySpec = () => copyOf(t);
   const kind = t.type === "terminal" ? "terminal" : "SFTP";
   return [
+    ...(t.type !== "welcome"
+      ? [
+          { label: "Rename tab", icon: <Pencil className="size-3.5" />, onClick: () => startRename(t.id) } as MenuItem,
+          ...(t.customTitle ? [{ label: "Reset tab name", icon: <RotateCcw className="size-3.5" />, onClick: () => useTabs.getState().rename(t.id, null) } as MenuItem] : []),
+          "separator" as const,
+        ]
+      : []),
     // a ghost chat belongs to its window: closing that window deletes it
     { label: "Move to new window", icon: <SquareArrowOutUpRight className="size-3.5" />, disabled: !transferable || (t.type === "claude" && !!t.ghost), onClick: () => void moveTabToWindow(t) },
     // A copy of an AI workspace tab would run a second agent on the same session.
@@ -435,6 +451,38 @@ function tabMenuItems(t: Tab): MenuItem[] {
 }
 
 /** AI workspace tab title: pulsing "working" while the agent runs, a dot when it finished unseen. */
+/** Editing a tab's name in place: Enter or leaving the field keeps it, Escape doesn't, and an
+ *  empty name goes back to the tab's own title. */
+function TabNameInput({ tab }: { tab: Tab }) {
+  const done = useRef(false);
+  const finish = (name: string | null) => {
+    if (done.current) return;
+    done.current = true;
+    if (name !== null) useTabs.getState().rename(tab.id, name);
+    useRenaming.setState({ id: null });
+  };
+  return (
+    <input
+      autoFocus
+      aria-label="Tab name"
+      defaultValue={tabTitle(tab)}
+      placeholder={tab.title}
+      maxLength={80}
+      onFocus={(e) => e.currentTarget.select()}
+      // typing here mustn't drag, activate or close the tab, nor reach a terminal's shortcuts
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") finish(e.currentTarget.value);
+        else if (e.key === "Escape") finish(null);
+      }}
+      onBlur={(e) => finish(e.currentTarget.value)}
+      className="w-40 min-w-0 rounded border border-accent bg-app px-1 text-[13px] text-fg outline-none"
+    />
+  );
+}
+
 function AgentTabTitle({ tabId, title }: { tabId: string; title: string }) {
   const { working, done } = useTabActivity(tabId);
   return (
@@ -461,7 +509,7 @@ async function moveTabToWindow(t: Tab) {
   if (t.dirty && t.type !== "query") {
     const ok = await confirmDialog({
       title: "Move tab",
-      message: <>The tab <b>{t.title}</b> has unsaved changes, which are not moved to the new window. Move it anyway?</>,
+      message: <>The tab <b>{tabTitle(t)}</b> has unsaved changes, which are not moved to the new window. Move it anyway?</>,
       confirmLabel: "Move",
       danger: true,
     });
