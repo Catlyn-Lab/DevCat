@@ -12,6 +12,9 @@ Plain Markdown only: the app's dialog doesn't render HTML tags.
 
 ## Unreleased
 
+- **Rename tabs**: double-click a tab, or right-click it → **Rename tab**, to give a chat, terminal or any other tab
+  a name of its own. It stays while the tab's own title changes underneath (a terminal program's title, the chat's
+  title); empty it, or **Reset tab name**, to go back.
 - **To do list that agents keep**: a To do panel in the sidebar shows, per project, what your agents are running,
   what's next, what waits on someone else and what waits on you, with links to PRs, issues and files. Agents keep it
   current with the new `todo_write` and `todo_list` tools (`devcat mcp`; `project_todo_write` and

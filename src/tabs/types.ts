@@ -47,7 +47,11 @@ export type GitView = "history" | "changes" | "branches" | "stashes";
 
 export type Tab = TabSpec & {
   id: string;
+  /** What the tab is called by what's in it: a chat's title, the program's terminal title, a file's
+   *  name. Kept up to date underneath a name the user gave (`customTitle`). */
   title: string;
+  /** A name the user gave the tab (Rename tab); shown instead of `title` while the tab is open. */
+  customTitle?: string;
   /** dirty indicator (unsaved edits) */
   dirty?: boolean;
 };
@@ -74,3 +78,6 @@ export function tabConnId(t: TabSpec): string | null {
   if (t.type === "schema-compare") return t.sourceConnId ?? t.targetConnId ?? null;
   return null;
 }
+
+/** What a tab is called on screen: the name the user gave it, else its own title. */
+export const tabTitle = (t: Pick<Tab, "title" | "customTitle">): string => t.customTitle || t.title;
